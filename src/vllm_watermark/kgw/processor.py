@@ -74,9 +74,28 @@ discrepancy between that and BatchUpdate's own prose docstring.
 
 Env vars this module reads directly (never logged/printed as values):
     VLLM_WATERMARK_DEFAULT  "on"/"off" (default "off") -- whether requests
-        that don't pass a `watermark` extra_arg get watermarked.
+        that don't pass a `watermark` extra_arg get watermarked. Shared
+        (same name, same default, same parsing -- via
+        vllm_watermark.request_args) with
+        vllm_watermark.synthid.processor.
+    VLLM_WATERMARK_SCHEME   "kgw"/"synthid" (default "kgw") -- which
+        scheme requests that don't pass a `watermark_scheme` extra_arg
+        resolve to. A row only ever activates in THIS processor if the
+        resolved scheme == "kgw" -- see class docstring
+        "SCHEME-COORDINATION DESIGN". Shared with
+        vllm_watermark.synthid.processor (same name/default/parsing).
     VLLM_WATERMARK_GAMMA    float in (0, 1), default "0.25"
     VLLM_WATERMARK_DELTA    float, default "2.0"
+    VLLM_WATERMARK_CACHE_SIZE  int >= 0, default "1024" -- LRU size of the
+        greenlist memo cache, keyed (hash_key, prev_token). Pure
+        memoization of greenlist_ids() (identical outputs, measured-equal
+        statistics); exists because torch.randperm(vocab_size) on CPU costs
+        ~7 ms at vocab 151936 and dominated decode latency in the Phase 1
+        benchmark (3.2x slowdown uncached, see EXPERIMENTS.md 2026-08-08).
+        Zipfian token frequency makes a small LRU highly effective. Memory
+        bound: one CPU int64 tensor of gamma*vocab_size ids per entry
+        (~300 KB at gamma 0.25 / vocab 151936 -> ~300 MB at 1024 entries).
+        0 disables caching.
     (key material itself is loaded via vllm_watermark.keys -- WATERMARK_KEYS
     / WATERMARK_KEY / WATERMARK_KEY_ID -- never read directly by this file)
 
@@ -87,16 +106,30 @@ recognizes:
     watermark_key_id   str, non-empty -- which configured key to use
                         (default: vllm_watermark.keys' own default-key
                         resolution, i.e. WATERMARK_KEY_ID env or "default")
+    watermark_scheme   "kgw" | "synthid" -- overrides VLLM_WATERMARK_SCHEME
+                        for this request; this processor only ever biases
+                        a row whose resolved scheme == SCHEME ("kgw") --
+                        see _new_row_state() and
+                        vllm_watermark.request_args module docstring
+                        "SCHEME-COORDINATION DESIGN".
 Any other `watermark*`-prefixed key is rejected by validate_params() as an
 unknown argument (fail loud on typos rather than silently ignoring them).
+The parsing/validation of all three keys above is shared with
+vllm_watermark.synthid.processor.SynthIDLogitsProcessor via
+vllm_watermark.request_args (single implementation, so the two
+validate_params() methods cannot silently disagree about the same
+extra_args -- see that module's docstring for why this matters given vLLM
+calls validate_params() on every loaded logits processor for every
+request, per docs/api-notes-vllm-v0.18.0.md §6).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -108,6 +141,12 @@ from vllm.v1.sample.logits_processor import (
 
 from vllm_watermark.keys import WatermarkKey, load_key, load_keys
 from vllm_watermark.kgw.core import KGWConfig, greenlist_ids
+from vllm_watermark.request_args import (
+    resolve_default_on,
+    resolve_default_scheme,
+    resolve_key_or_raise,
+    resolve_request,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -117,55 +156,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["KGWLogitsProcessor", "RowState"]
 
-# Per-request extra_args / vllm_xargs keys this processor understands. Any
-# other "watermark"-prefixed key is a validate_params() error (see module
-# docstring "Per-request vllm_xargs keys").
-_KNOWN_WATERMARK_XARGS = frozenset({"watermark", "watermark_key_id"})
-
 _DEFAULT_GAMMA_ENV = "0.25"
 _DEFAULT_DELTA_ENV = "2.0"
-_DEFAULT_ON_ENV = "off"
-
-
-def _parse_watermark_flag(value: Any) -> bool:
-    """Parse the `watermark` extra_arg / VLLM_WATERMARK_DEFAULT env value.
-
-    Accepts a real bool (JSON `true`/`false` deserializes to Python bool via
-    vllm_xargs' `dict[str, str | int | float | list[...]]` typing -- see
-    docs/api-notes) or a string in {"on","off","true","false","1","0",
-    "yes","no"} (case-insensitive). Anything else raises ValueError, which
-    is exactly the error type validate_params() and __init__() need to
-    surface a clear rejection (see module docstring "Per-request error
-    surfacing").
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in ("on", "true", "1", "yes"):
-            return True
-        if v in ("off", "false", "0", "no"):
-            return False
-    raise ValueError(
-        f"watermark must be 'on'/'off' (or a boolean), got {value!r}"
-    )
-
-
-def _resolve_key(key_id: "str | None", *, context: str) -> WatermarkKey:
-    """Thin wrapper around vllm_watermark.keys.load_key() that normalizes
-    its failure modes (RuntimeError: nothing configured at all; KeyError:
-    key_id not among configured keys; ValueError: malformed WATERMARK_KEYS/
-    WATERMARK_KEY env value) to a single ValueError, suitable for both
-    validate_params() (must raise ValueError per the vLLM contract -- see
-    interface.py LogitsProcessor.validate_params docstring) and __init__()
-    defensive checks. `context` is prepended to the message so the API
-    caller sees *why* the key lookup was attempted, not just keys.py's
-    generic "no key configured" text.
-    """
-    try:
-        return load_key(key_id=key_id)
-    except (RuntimeError, KeyError, ValueError) as exc:
-        raise ValueError(f"{context}: {exc}") from exc
 
 
 @dataclass
@@ -196,7 +188,20 @@ class KGWLogitsProcessor(LogitsProcessor):
     see vllm/v1/sample/logits_processor/__init__.py `__all__`). Loaded either
     via the `vllm.logits_processors` entry-point group (see pyproject.toml)
     or via `--logits-processors vllm_watermark.kgw.processor:KGWLogitsProcessor`.
+
+    SCHEME-COORDINATION DESIGN (see vllm_watermark.request_args module
+    docstring for the full rationale): both this class and
+    vllm_watermark.synthid.processor.SynthIDLogitsProcessor can be loaded
+    into the same engine at once. Each sets a class attribute `SCHEME`; a
+    batch row is only ever added to THIS processor's self._rows if the
+    request's resolved scheme (per-request `watermark_scheme` extra_arg, or
+    VLLM_WATERMARK_SCHEME env default) equals `SCHEME` -- see
+    _new_row_state(). Exactly one of the two loaded processors ever biases
+    any given row, even though both receive update_state()/apply() calls
+    for every row in the batch.
     """
+
+    SCHEME = "kgw"
 
     @classmethod
     def validate_params(cls, sampling_params: "SamplingParams") -> None:
@@ -225,22 +230,26 @@ class KGWLogitsProcessor(LogitsProcessor):
         """
         extra_args = sampling_params.extra_args or {}
 
-        watermark_keys_present = {k for k in extra_args if k.startswith("watermark")}
-        unknown = watermark_keys_present - _KNOWN_WATERMARK_XARGS
-        if unknown:
-            raise ValueError(
-                f"Unknown watermark_* extra_args key(s) {sorted(unknown)}; "
-                f"known keys are {sorted(_KNOWN_WATERMARK_XARGS)}"
-            )
-
-        watermark_flag = extra_args.get("watermark")
-        requested_on = (
-            _parse_watermark_flag(watermark_flag) if watermark_flag is not None else None
+        # default_on=False here (not self._default_on -- this is a
+        # classmethod, there is no self) reproduces exactly the prior
+        # "requested_on" semantics: `enabled` comes out True iff the
+        # request's `watermark` extra_arg is explicitly present and parses
+        # truthy, regardless of VLLM_WATERMARK_DEFAULT. See
+        # vllm_watermark.request_args.resolve_request() docstring
+        # "default_on" for why passing False here is exactly this, and
+        # module docstring "Per-request error surfacing" above for why an
+        # implicit (env-defaulted) enable is deliberately NOT
+        # resolved-key-checked at request-validation time -- unchanged
+        # behavior from before this function was routed through
+        # resolve_request(). default_scheme is irrelevant to what this
+        # method validates (key resolvability does not depend on scheme --
+        # both schemes share the same vllm_watermark.keys store) beyond
+        # resolve_request() rejecting a malformed `watermark_scheme` value,
+        # so `cls.SCHEME` is passed only for that validation, not consumed
+        # further here.
+        enabled, _scheme, key_id = resolve_request(
+            extra_args, default_on=False, default_scheme=cls.SCHEME
         )
-
-        key_id = extra_args.get("watermark_key_id")
-        if key_id is not None and (not isinstance(key_id, str) or not key_id.strip()):
-            raise ValueError(f"watermark_key_id must be a non-empty string, got {key_id!r}")
 
         # Fail loudly at request-validation time (before generation starts)
         # rather than silently degrading to unwatermarked output later in
@@ -248,9 +257,13 @@ class KGWLogitsProcessor(LogitsProcessor):
         # identify: "a request explicitly asking watermark=on gets a clear
         # ValueError at validate time."
         if key_id is not None:
-            _resolve_key(key_id, context=f"watermark_key_id={key_id!r} given but not resolvable")
-        elif requested_on:
-            _resolve_key(None, context="watermark=on requested but no watermark keys are configured")
+            resolve_key_or_raise(
+                key_id, context=f"watermark_key_id={key_id!r} given but not resolvable"
+            )
+        elif enabled:
+            resolve_key_or_raise(
+                None, context="watermark=on requested but no watermark keys are configured"
+            )
 
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
@@ -268,9 +281,11 @@ class KGWLogitsProcessor(LogitsProcessor):
 
         self._gamma = float(os.environ.get("VLLM_WATERMARK_GAMMA", _DEFAULT_GAMMA_ENV))
         self._delta = float(os.environ.get("VLLM_WATERMARK_DELTA", _DEFAULT_DELTA_ENV))
-        self._default_on = _parse_watermark_flag(
-            os.environ.get("VLLM_WATERMARK_DEFAULT", _DEFAULT_ON_ENV)
-        )
+        # Both env vars are shared with vllm_watermark.synthid.processor
+        # (same names, same defaults, same parsing) -- see
+        # vllm_watermark.request_args module docstring.
+        self._default_on = resolve_default_on()
+        self._default_scheme = resolve_default_scheme()
 
         # Keys are read from env ONCE here, at engine init, and cached for
         # the life of this instance -- consistent with the documented fact
@@ -301,6 +316,18 @@ class KGWLogitsProcessor(LogitsProcessor):
         # logits processors -- see docs/api-notes "sparse representation").
         self._rows: "dict[int, RowState]" = {}
 
+        # Greenlist LRU memo cache -- see module docstring
+        # VLLM_WATERMARK_CACHE_SIZE. Pure memoization: values are exactly
+        # greenlist_ids(prev_token, cfg) results (CPU LongTensor), keyed by
+        # everything the result depends on besides process-global gamma/
+        # vocab_size (constant for this instance): (hash_key, prev_token).
+        self._cache_size = int(os.environ.get("VLLM_WATERMARK_CACHE_SIZE", "1024"))
+        if self._cache_size < 0:
+            raise ValueError(
+                f"VLLM_WATERMARK_CACHE_SIZE must be >= 0, got {self._cache_size}"
+            )
+        self._greenlist_cache: "OrderedDict[tuple[int, int], torch.Tensor]" = OrderedDict()
+
         # Logged once, not per apply() call -- see _check_vocab_width().
         self._vocab_width_checked = False
 
@@ -327,19 +354,23 @@ class KGWLogitsProcessor(LogitsProcessor):
         output_tok_ids: "list[int]",
     ) -> "RowState | None":
         """Return the RowState for a newly-added request, or None if the
-        watermark should not be applied to it (row is then absent from
-        self._rows -- see class docstring "sparse" note)."""
+        watermark should not be applied to it BY THIS PROCESSOR (row is
+        then absent from self._rows -- see class docstring "sparse" note).
+
+        "Not applied by this processor" covers two cases: watermarking is
+        disabled for the request, OR it is enabled but resolved to the
+        OTHER scheme (e.g. `watermark_scheme=synthid`) -- see class
+        docstring "SCHEME-COORDINATION DESIGN". In the second case
+        SynthIDLogitsProcessor's own _new_row_state() (if that processor is
+        also loaded) is what adds the row to ITS self._rows instead.
+        """
         extra_args = params.extra_args or {}
-        watermark_flag = extra_args.get("watermark")
-        enabled = (
-            self._default_on
-            if watermark_flag is None
-            else _parse_watermark_flag(watermark_flag)
+        enabled, scheme, key_id = resolve_request(
+            extra_args, self._default_on, self._default_scheme
         )
-        if not enabled:
+        if not enabled or scheme != self.SCHEME:
             return None
 
-        key_id = extra_args.get("watermark_key_id")
         key = self._keys.get(key_id) if key_id is not None else self._default_key
         if key is None:
             # Defensive only: validate_params() (called for every request
@@ -423,6 +454,42 @@ class KGWLogitsProcessor(LogitsProcessor):
                 if b_entry is not None and direct == MoveDirectionality.SWAP:
                     self._rows[a_index] = b_entry
 
+    def _greenlist_ids_cached(self, hash_key: int, prev_token: int) -> torch.Tensor:
+        """greenlist_ids() with an LRU memo -- identical outputs by
+        construction (the cached value IS a previous greenlist_ids() return
+        for the same (hash_key, prev_token) and the same process-global
+        gamma/vocab_size). Motivation + sizing: module docstring
+        VLLM_WATERMARK_CACHE_SIZE. Callers must not mutate the returned
+        tensor (apply() only reads it / copies it to the GPU)."""
+        if self._cache_size == 0:
+            return greenlist_ids(
+                prev_token,
+                KGWConfig(
+                    vocab_size=self._vocab_size,
+                    hash_key=hash_key,
+                    gamma=self._gamma,
+                    delta=self._delta,
+                ),
+            )
+        cache_key = (hash_key, prev_token)
+        ids = self._greenlist_cache.get(cache_key)
+        if ids is not None:
+            self._greenlist_cache.move_to_end(cache_key)
+            return ids
+        ids = greenlist_ids(
+            prev_token,
+            KGWConfig(
+                vocab_size=self._vocab_size,
+                hash_key=hash_key,
+                gamma=self._gamma,
+                delta=self._delta,
+            ),
+        )
+        self._greenlist_cache[cache_key] = ids
+        if len(self._greenlist_cache) > self._cache_size:
+            self._greenlist_cache.popitem(last=False)
+        return ids
+
     def _check_vocab_width(self, vocab_width: int) -> None:
         """Warn (once) if logits.shape[-1] disagrees with the configured
         vocab_size, and assert the direction that would be genuinely unsafe.
@@ -490,13 +557,7 @@ class KGWLogitsProcessor(LogitsProcessor):
             # staleness if gamma/delta/vocab_size ever became per-request
             # instead of process-global. See vllm_watermark.kgw.core for the
             # KGWConfig contract.
-            cfg = KGWConfig(
-                vocab_size=self._vocab_size,
-                hash_key=row.hash_key,
-                gamma=self._gamma,
-                delta=self._delta,
-            )
-            ids = greenlist_ids(prev_token, cfg)  # CPU LongTensor
+            ids = self._greenlist_ids_cached(row.hash_key, prev_token)  # CPU LongTensor
 
             if vocab_width < self._vocab_size:
                 # Only reachable if the _check_vocab_width() assert above

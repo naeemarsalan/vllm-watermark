@@ -403,3 +403,29 @@ degrade to near-zero.
   (directory listing) and
   `https://api.github.com/repos/vllm-project/vllm/git/refs/tags/v0.18.0`
   (tag → commit SHA), both via `gh api`.
+
+## 8. Plugin loading has NO deduplication — entry points + FQCN flag double-load (EXECUTED)
+
+`_load_custom_logitsprocs()` (vllm/v1/sample/logits_processor/__init__.py, ~line 160)
+returns `_load_logitsprocs_plugins() + _load_logitsprocs_by_fqcns(logits_processors)`:
+
+- `_load_logitsprocs_plugins()` loads **every** installed entry point in group
+  `vllm.logits_processors` **unconditionally** — a pip-installed plugin package is
+  active with no CLI flag at all.
+- `_load_logitsprocs_by_fqcns()` appends every `--logits-processors` FQCN.
+- The two lists are concatenated with **no dedup** — a class present both as an entry
+  point and as a flag value is instantiated **twice**, and both instances run in
+  `apply()` — for a bias-style watermark this silently doubles the effective delta.
+
+EXECUTED in the serving pod (2026-08-08, vLLM v0.18.0):
+
+```
+>>> _load_custom_logitsprocs(["vllm_watermark.kgw.processor:KGWLogitsProcessor"])
+['KGWLogitsProcessor', 'SynthIDLogitsProcessor', 'KGWLogitsProcessor']   # KGW twice!
+>>> _load_custom_logitsprocs([])
+['KGWLogitsProcessor', 'SynthIDLogitsProcessor']                          # correct
+```
+
+**Rule for this repo: install the wheel and pass NO `--logits-processors` flag.**
+The Phase 1 measurements taken with flag+entry-point (effective delta 4.0) were
+re-taken single-instance — see EXPERIMENTS.md 2026-08-08 correction entry.

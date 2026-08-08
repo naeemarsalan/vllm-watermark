@@ -121,10 +121,16 @@ spec:
           fi
           export PYTHONPATH="/plugin-site${PYTHONPATH:+:$PYTHONPATH}"
           echo "[vllm-watermark] plugin installed, starting vllm serve ..."
+          # NO --logits-processors flag: v0.18.0 auto-loads every installed
+          # entry point in group vllm.logits_processors AND appends FQCN-flag
+          # classes WITHOUT dedup (_load_custom_logitsprocs = plugins + fqcns,
+          # EXECUTED evidence in EXPERIMENTS.md 2026-08-08: the flag+entry-point
+          # combination double-loaded KGW and silently doubled the effective
+          # delta). The installed wheel's entry points load exactly one KGW and
+          # one SynthID processor.
           exec vllm serve Qwen/Qwen2.5-0.5B-Instruct \
             --max-model-len 4096 \
-            --gpu-memory-utilization 0.90 \
-            --logits-processors vllm_watermark.kgw.processor:KGWLogitsProcessor
+            --gpu-memory-utilization 0.90
       ports:
         - name: http
           containerPort: 8000

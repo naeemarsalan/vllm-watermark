@@ -3,25 +3,20 @@
 vLLM is not installed on this workstation (AGENTS.md environment facts;
 docs/api-notes-vllm-v0.18.0.md), so `vllm_watermark.kgw.processor` cannot be
 imported as-is: it does `from vllm.v1.sample.logits_processor import
-(BatchUpdate, LogitsProcessor, MoveDirectionality)` at module level. Before
-importing it, this file installs a minimal stub of exactly that import
-surface into `sys.modules`, built to match the *actual* v0.18.0 source
-verbatim (field names, `MoveDirectionality` member names, `LogitsProcessor`
-method signatures) -- see docs/api-notes-vllm-v0.18.0.md §1 for the fetched
-source this is checked against.
-
-If real `vllm` IS importable (e.g. this file runs in a cluster CI
-environment where vLLM 0.18.0 is actually installed), the stub is skipped
-and the *real* vllm.v1.sample.logits_processor classes are used instead --
-a strictly stronger test. Everything else in this file (KGWConfig,
-greenlist_ids, WatermarkKey, load_key/load_keys) is Task A's real,
-non-stubbed code: this file is a wiring test for processor.py, not a
+(BatchUpdate, LogitsProcessor, MoveDirectionality)` at module level.
+`tests/conftest.py` installs a minimal stub of exactly that import surface
+into `sys.modules` (or leaves real vLLM in place if it's actually
+installed) BEFORE this file is collected -- see that module's docstring for
+the full rationale (shared, not duplicated, with
+`test_synthid_processor_static.py`). Everything else in this file
+(KGWConfig, greenlist_ids, WatermarkKey, load_key/load_keys) is Task A's
+real, non-stubbed code: this file is a wiring test for processor.py, not a
 reimplementation of Task A's algorithm tests (see
 tests/test_kgw_equivalence.py for those).
 
 Run with:
     PYTHONPATH=src /usr/bin/python3 -m pytest tests/test_processor_static.py -v
-(this file also self-inserts src/ onto sys.path so plain
+(conftest.py self-inserts src/ onto sys.path so plain
 `pytest tests/test_processor_static.py` works without PYTHONPATH too)
 
 All key material below is an obviously-dummy test value (AGENTS.md #3 /
@@ -41,118 +36,54 @@ Env-var pattern used throughout (important -- see keys.py, Task A):
     `test_init_default_key_id_env_resolves` and
     `test_init_loads_configured_keys`, which exist specifically to pin down
     that distinction.
+
+SCHEME-COORDINATION tests (KGW-vs-SynthID row routing, `watermark_scheme`
+validation) live in this file too, not just in
+`test_synthid_processor_static.py`, because they exercise
+KGWLogitsProcessor's own `validate_params()`/`_new_row_state()` -- see the
+"scheme coordination" section near the bottom. The cross-processor
+"both loaded together, each claims only its own rows" test additionally
+imports `SynthIDLogitsProcessor` and needs `vllm_watermark.synthid.core`/
+`vllm_watermark.synthid.detector` (Task A2) importable; it is skipped
+(not failed) if that package is not yet present, so this file remains
+runnable standalone regardless of Task A2/B2 landing order -- see
+`_synthid_available()` below.
 """
 
 from __future__ import annotations
 
-import sys
-import types
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 import torch
 
-_SRC = Path(__file__).resolve().parent.parent / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+from conftest import BatchUpdate, MoveDirectionality  # noqa: E402
 
-try:
-    import vllm  # noqa: F401  -- real vLLM, if ever present, wins over the stub
-
-    _USING_REAL_VLLM = True
-except ImportError:
-    _USING_REAL_VLLM = False
-
-    from enum import Enum, auto
-
-    class MoveDirectionality(Enum):
-        # Verified against vllm/v1/sample/logits_processor/interface.py
-        # v0.18.0, lines 17-21: two members, this exact naming.
-        UNIDIRECTIONAL = auto()
-        SWAP = auto()
-
-    @dataclass(frozen=True)
-    class BatchUpdate:
-        # Verified against interface.py v0.18.0, lines 36-57: exactly these
-        # four fields, this exact order (we always construct with keyword
-        # args in this file, so order does not matter to us either way).
-        batch_size: int
-        removed: list
-        added: list
-        moved: list
-
-    class LogitsProcessor:
-        """Minimal stand-in for the abstract base -- interface.py lines
-        60-106. Not actually abstract here (no enforcement needed for a
-        unit test that always overrides every method)."""
-
-        @classmethod
-        def validate_params(cls, sampling_params):
-            return None
-
-        def __init__(self, vllm_config, device, is_pin_memory) -> None:
-            raise NotImplementedError
-
-        def apply(self, logits):
-            raise NotImplementedError
-
-        def is_argmax_invariant(self) -> bool:
-            raise NotImplementedError
-
-        def update_state(self, batch_update) -> None:
-            raise NotImplementedError
-
-    _vllm = types.ModuleType("vllm")
-    _vllm_v1 = types.ModuleType("vllm.v1")
-    _vllm_v1_sample = types.ModuleType("vllm.v1.sample")
-    _vllm_lp = types.ModuleType("vllm.v1.sample.logits_processor")
-    _vllm_lp.BatchUpdate = BatchUpdate
-    _vllm_lp.LogitsProcessor = LogitsProcessor
-    _vllm_lp.MoveDirectionality = MoveDirectionality
-    _vllm_v1_sample.logits_processor = _vllm_lp
-    _vllm_v1.sample = _vllm_v1_sample
-    _vllm.v1 = _vllm_v1
-
-    sys.modules["vllm"] = _vllm
-    sys.modules["vllm.v1"] = _vllm_v1
-    sys.modules["vllm.v1.sample"] = _vllm_v1_sample
-    sys.modules["vllm.v1.sample.logits_processor"] = _vllm_lp
-
-# Import order matters: the stub (if any) must be installed above before
-# this import, since processor.py does `from vllm.v1.sample.logits_processor
-# import ...` at module scope.
+# Import order matters: conftest.py's stub (if any) must already be
+# installed before this import, since processor.py does
+# `from vllm.v1.sample.logits_processor import ...` at module scope --
+# guaranteed by pytest always collecting conftest.py before test files in
+# its directory.
 from vllm_watermark.kgw.processor import KGWLogitsProcessor, RowState  # noqa: E402
 from vllm_watermark.kgw.core import KGWConfig, greenlist_ids  # noqa: E402
 from vllm_watermark.keys import load_key  # noqa: E402
 
-if _USING_REAL_VLLM:
-    from vllm.v1.sample.logits_processor import (  # noqa: E402
-        BatchUpdate,
-        MoveDirectionality,
-    )
+
+def _synthid_available() -> bool:
+    """True iff vllm_watermark.synthid.processor (Task A2 + this task,
+    B2) can be imported. Lets the cross-processor "both loaded together"
+    test in this file (see "scheme coordination" section) be skipped rather
+    than failed if it runs before Task A2 has landed."""
+    try:
+        import vllm_watermark.synthid.processor  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
 # Fixtures / fakes
 # ---------------------------------------------------------------------------
-
-_WATERMARK_ENV_VARS = (
-    "WATERMARK_KEYS",
-    "WATERMARK_KEY",
-    "WATERMARK_KEY_ID",
-    "VLLM_WATERMARK_DEFAULT",
-    "VLLM_WATERMARK_GAMMA",
-    "VLLM_WATERMARK_DELTA",
-)
-
-
-@pytest.fixture(autouse=True)
-def _clean_watermark_env(monkeypatch):
-    """Every test starts from a blank slate regardless of ambient env."""
-    for var in _WATERMARK_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
-    yield
 
 
 class _FakeModelConfig:
@@ -550,3 +481,181 @@ def test_check_vocab_width_only_warns_once(monkeypatch, caplog):
 
     mismatch_warnings = [r for r in caplog.records if "logits width" in r.message]
     assert len(mismatch_warnings) == 1, "vocab-width mismatch must be logged exactly once, not per apply() call"
+
+
+def test_greenlist_cache_identical_and_lru(monkeypatch):
+    """The LRU memo must return bit-identical greenlists vs the uncached path,
+    and evict oldest entries beyond VLLM_WATERMARK_CACHE_SIZE."""
+    import torch
+
+    from vllm_watermark.kgw.core import KGWConfig, greenlist_ids
+
+    monkeypatch.setenv("VLLM_WATERMARK_CACHE_SIZE", "4")
+    proc = _make_processor(vocab_size=1000)
+    hash_key = 0xDEADBEEF12345678 % (1 << 64)
+    for prev_token in [7, 11, 7, 999, 0, 42, 7]:
+        cached = proc._greenlist_ids_cached(hash_key, prev_token)
+        direct = greenlist_ids(
+            prev_token,
+            KGWConfig(vocab_size=proc._vocab_size, hash_key=hash_key,
+                      gamma=proc._gamma, delta=proc._delta),
+        )
+        assert torch.equal(cached, direct), prev_token
+    assert len(proc._greenlist_cache) <= 4
+
+    monkeypatch.setenv("VLLM_WATERMARK_CACHE_SIZE", "0")
+    proc0 = _make_processor(vocab_size=1000)
+    out = proc0._greenlist_ids_cached(hash_key, 7)
+    assert torch.equal(out, greenlist_ids(
+        7, KGWConfig(vocab_size=proc0._vocab_size, hash_key=hash_key,
+                     gamma=proc0._gamma, delta=proc0._delta)))
+    assert len(proc0._greenlist_cache) == 0
+
+
+# ---------------------------------------------------------------------------
+# Scheme coordination (watermark_scheme / VLLM_WATERMARK_SCHEME) -- see
+# vllm_watermark.request_args module docstring "SCHEME-COORDINATION DESIGN".
+# ---------------------------------------------------------------------------
+
+
+def test_scheme_class_attribute():
+    assert KGWLogitsProcessor.SCHEME == "kgw"
+
+
+def test_validate_params_accepts_no_watermark_scheme_unchanged(monkeypatch):
+    """A request that never mentions watermark_scheme at all must validate
+    exactly as before this task -- both with keys configured and without,
+    both watermark on and off. Pins down the "WITHOUT changing any existing
+    behavior for requests that don't pass watermark_scheme when
+    VLLM_WATERMARK_SCHEME is unset/kgw" requirement."""
+    KGWLogitsProcessor.validate_params(_FakeSamplingParams(extra_args=None))
+    KGWLogitsProcessor.validate_params(_FakeSamplingParams(extra_args={"watermark": "off"}))
+    with pytest.raises(ValueError, match="no watermark keys are configured"):
+        KGWLogitsProcessor.validate_params(_FakeSamplingParams(extra_args={"watermark": "on"}))
+
+    monkeypatch.setenv("WATERMARK_KEYS", f"k1:{_DUMMY_SECRET_K1}")
+    KGWLogitsProcessor.validate_params(
+        _FakeSamplingParams(extra_args={"watermark": "on", "watermark_key_id": "k1"})
+    )
+
+
+@pytest.mark.parametrize("scheme", ["kgw", "synthid", "KGW", "SynthID", " kgw "])
+def test_validate_params_accepts_valid_watermark_scheme_values(monkeypatch, scheme):
+    monkeypatch.setenv("WATERMARK_KEYS", f"k1:{_DUMMY_SECRET_K1}")
+    KGWLogitsProcessor.validate_params(
+        _FakeSamplingParams(
+            extra_args={"watermark": "on", "watermark_key_id": "k1", "watermark_scheme": scheme}
+        )
+    )
+
+
+@pytest.mark.parametrize("bad_scheme", ["bogus", "KGW2", 3, 1.5, ""])
+def test_validate_params_rejects_invalid_watermark_scheme_values(bad_scheme):
+    with pytest.raises(ValueError, match="watermark_scheme"):
+        KGWLogitsProcessor.validate_params(
+            _FakeSamplingParams(extra_args={"watermark_scheme": bad_scheme})
+        )
+
+
+def test_validate_params_explicit_none_watermark_scheme_means_omitted():
+    """extra_args={"watermark_scheme": None} is indistinguishable from
+    omitting the key entirely (dict.get returns None either way) -- must
+    NOT raise, and resolves to the default scheme, not a rejection."""
+    KGWLogitsProcessor.validate_params(
+        _FakeSamplingParams(extra_args={"watermark_scheme": None})
+    )
+
+
+def test_validate_params_now_recognizes_watermark_scheme_as_known_key():
+    """Before this task, `watermark_scheme` would have been rejected as an
+    unknown watermark_* key (KNOWN_WATERMARK_XARGS used to be just
+    {"watermark", "watermark_key_id"}). It must now be accepted as a known
+    key (subject to its own value validation, covered above)."""
+    KGWLogitsProcessor.validate_params(
+        _FakeSamplingParams(extra_args={"watermark_scheme": "kgw"})
+    )
+    KGWLogitsProcessor.validate_params(
+        _FakeSamplingParams(extra_args={"watermark_scheme": "synthid"})
+    )
+
+
+def test_init_default_scheme_env(monkeypatch):
+    processor = _make_processor(vocab_size=1000)
+    assert processor._default_scheme == "kgw", "VLLM_WATERMARK_SCHEME unset -> default 'kgw'"
+
+    monkeypatch.setenv("VLLM_WATERMARK_SCHEME", "synthid")
+    processor = _make_processor(vocab_size=1000)
+    assert processor._default_scheme == "synthid"
+
+
+def test_init_bad_scheme_env_raises(monkeypatch):
+    monkeypatch.setenv("VLLM_WATERMARK_SCHEME", "not-a-scheme")
+    with pytest.raises(ValueError, match="watermark_scheme"):
+        _make_processor(vocab_size=1000)
+
+
+def test_new_row_state_scheme_mismatch_row_absent(monkeypatch):
+    """A request explicitly asking for watermark=on but watermark_scheme=
+    "synthid" must NOT activate a row in KGWLogitsProcessor -- see class
+    docstring "SCHEME-COORDINATION DESIGN"."""
+    monkeypatch.setenv("WATERMARK_KEY", _DUMMY_SECRET)
+    processor = _make_processor()
+
+    added = [
+        (0, _FakeSamplingParams(
+            extra_args={"watermark": "on", "watermark_scheme": "synthid"}
+        ), None, [1]),
+        (1, _FakeSamplingParams(
+            extra_args={"watermark": "on", "watermark_scheme": "kgw"}
+        ), None, [2]),
+        (2, _FakeSamplingParams(extra_args={"watermark": "on"}), None, [3]),  # no scheme -> default "kgw"
+    ]
+    processor.update_state(BatchUpdate(batch_size=3, removed=[], added=added, moved=[]))
+
+    assert set(processor._rows) == {1, 2}, "row 0 (scheme=synthid) must be absent from KGW's rows"
+
+
+def test_new_row_state_scheme_default_from_env(monkeypatch):
+    """VLLM_WATERMARK_SCHEME=synthid means a request with NO explicit
+    watermark_scheme resolves to "synthid" and therefore does NOT activate
+    in KGWLogitsProcessor, even though `watermark=on` is explicit."""
+    monkeypatch.setenv("WATERMARK_KEY", _DUMMY_SECRET)
+    monkeypatch.setenv("VLLM_WATERMARK_SCHEME", "synthid")
+    processor = _make_processor()
+
+    added = [(0, _FakeSamplingParams(extra_args={"watermark": "on"}), None, [1])]
+    processor.update_state(BatchUpdate(batch_size=1, removed=[], added=added, moved=[]))
+
+    assert processor._rows == {}, "default scheme is synthid -> KGW must not claim this row"
+
+
+@pytest.mark.skipif(not _synthid_available(), reason="vllm_watermark.synthid.processor not present yet")
+def test_both_processors_loaded_each_claims_only_its_own_rows(monkeypatch):
+    """The end-to-end scheme-coordination scenario: KGWLogitsProcessor and
+    SynthIDLogitsProcessor loaded into the same "engine" (two independent
+    instances, as build_logitsprocs() would construct -- see
+    docs/api-notes-vllm-v0.18.0.md §3), fed the IDENTICAL BatchUpdate. Each
+    must end up with exactly its own scheme's rows in self._rows, the two
+    sets are disjoint, and together they cover every enabled row."""
+    from vllm_watermark.synthid.processor import SynthIDLogitsProcessor
+
+    monkeypatch.setenv("WATERMARK_KEY", _DUMMY_SECRET)
+    kgw = _make_processor(vocab_size=1000)
+    synthid = SynthIDLogitsProcessor(_FakeVllmConfig(1000), device="cpu", is_pin_memory=False)
+
+    added = [
+        (0, _FakeSamplingParams(extra_args={"watermark": "on", "watermark_scheme": "kgw"}), None, [1]),
+        (1, _FakeSamplingParams(extra_args={"watermark": "on", "watermark_scheme": "synthid"}), None, [2]),
+        (2, _FakeSamplingParams(extra_args={"watermark": "off"}), None, [3]),
+        (3, _FakeSamplingParams(extra_args={"watermark": "on", "watermark_scheme": "kgw"}), None, [4]),
+        (4, _FakeSamplingParams(extra_args={"watermark": "on", "watermark_scheme": "synthid"}), None, [5]),
+    ]
+    batch_update = BatchUpdate(batch_size=5, removed=[], added=added, moved=[])
+
+    kgw.update_state(batch_update)
+    synthid.update_state(batch_update)
+
+    assert set(kgw._rows) == {0, 3}
+    assert set(synthid._rows) == {1, 4}
+    assert set(kgw._rows) & set(synthid._rows) == set(), "no row may be claimed by both processors"
+    assert set(kgw._rows) | set(synthid._rows) == {0, 1, 3, 4}, "every enabled row must be claimed by exactly one"

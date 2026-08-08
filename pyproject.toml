@@ -44,6 +44,7 @@ test = ["pytest"]
 # docs/api-notes-vllm-v0.18.0.md.
 [project.entry-points."vllm.logits_processors"]
 kgw = "vllm_watermark.kgw.processor:KGWLogitsProcessor"
+synthid = "vllm_watermark.synthid.processor:SynthIDLogitsProcessor"
 
 [tool.setuptools.packages.find]
 where = ["src"]

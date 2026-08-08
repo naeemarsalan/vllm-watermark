@@ -104,7 +104,36 @@ from vllm_watermark.keys import load_key  # noqa: E402
 from vllm_watermark.kgw.core import KGWConfig  # noqa: E402
 from vllm_watermark.kgw.detector import DEFAULT_Z_THRESHOLD, detect_text  # noqa: E402
 
+# SynthID support (--scheme synthid). Imported lazily/defensively -- per the
+# task brief ("if the module is missing when you test, still write the code
+# against the contract and mark untested") this whole block must not break
+# `--scheme kgw` (the default) usage if vllm_watermark.synthid is ever absent
+# from a checkout. See main()'s --scheme dispatch and INTERFACE CONTRACT in
+# CLAUDE.md: vllm_watermark.synthid.core.SynthIDConfig,
+# vllm_watermark.synthid.detector.{score_token_ids_mean,
+# score_token_ids_weighted_mean, DEFAULT_Z_THRESHOLD}.
+try:
+    from vllm_watermark.synthid.core import DEFAULT_SYNTHID_DEPTH, SynthIDConfig  # noqa: E402
+    from vllm_watermark.synthid import detector as synthid_detector  # noqa: E402
+
+    _SYNTHID_IMPORT_ERROR: "Exception | None" = None
+except ImportError as _exc:  # pragma: no cover - defensive, see comment above
+    DEFAULT_SYNTHID_DEPTH = 30
+    SynthIDConfig = None  # type: ignore[assignment]
+    synthid_detector = None  # type: ignore[assignment]
+    _SYNTHID_IMPORT_ERROR = _exc
+
+# Must match src/vllm_watermark/synthid/processor.py's `_SYNTHID_KEY_LABEL`
+# exactly -- see that module's "CROSS-TASK COORDINATION NOTE" -- or
+# generation-time and detection-time subkeys diverge silently.
+_SYNTHID_KEY_LABEL = b"vllm-watermark:synthid-subkeys:v1"
+
 DEFAULT_MODEL_TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
+
+# scorer name -> DetectionResult field read as "the" score for TPR/FPR
+# purposes; both are always reported per the task spec ("score with BOTH
+# mean and weighted-mean scorers").
+SYNTHID_SCORERS = ("mean", "weighted_mean")
 LENGTH_BUCKETS = [
     ("<100", lambda n: n < 100),
     ("100-200", lambda n: 100 <= n < 200),
@@ -192,11 +221,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="minimum num_tokens_scored (post-dedup pair count) for a row to be included in stats",
     )
-    parser.add_argument("--gamma", type=float, default=0.25, help="must match the gamma used at generation time")
+    parser.add_argument("--gamma", type=float, default=0.25, help="must match the gamma used at generation time (KGW only)")
+    parser.add_argument(
+        "--scheme",
+        choices=["kgw", "synthid"],
+        default="kgw",
+        help="which watermark scheme's detector to score with (default: kgw)",
+    )
+    parser.add_argument(
+        "--synthid-depth",
+        type=int,
+        default=None,
+        help="SynthID tournament depth / key count (default: vllm_watermark.synthid.core.DEFAULT_SYNTHID_DEPTH); synthid only",
+    )
+    parser.add_argument(
+        "--synthid-ngram-len",
+        type=int,
+        default=5,
+        help="SynthID ngram_len, must match generation time (default 5, transformers'/DeepMind's default); synthid only",
+    )
     parser.add_argument(
         "--out",
         default="report",
-        help="output path stem; writes <stem>.md and <stem>.json (any .md/.json suffix given here is stripped)",
+        help="output path stem; writes <stem>.md and <stem>.json (any .md/.json suffix given here is stripped). "
+        "For --scheme synthid, one report is written per scorer: <stem>_mean.{md,json} and <stem>_weighted_mean.{md,json}.",
     )
     return parser
 
@@ -208,37 +256,21 @@ def _strip_known_suffix(out: str) -> str:
     return out
 
 
-def main(argv: "list[str] | None" = None) -> int:
-    args = build_parser().parse_args(argv)
-    print(f"vllm_watermark import: {_IMPORT_NOTE}")
+def score_corpora(
+    corpus_specs: "list[tuple[str, str]]",
+    score_fn,
+    z_threshold: float,
+    min_tokens: int,
+) -> dict:
+    """Score every corpus in corpus_specs with score_fn and build the
+    report dict shared by the KGW path and each SynthID scorer path.
 
-    try:
-        from transformers import AutoConfig, AutoTokenizer
-    except ImportError as exc:
-        print(
-            f"error: this script requires transformers (local-only tool): {exc}",
-            file=sys.stderr,
-        )
-        return 2
-
-    try:
-        key = load_key(key_id=args.key_id)
-    except (RuntimeError, KeyError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    print(f"Loading tokenizer/config {args.model_tokenizer!r} ...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_tokenizer)
-    vocab_size = AutoConfig.from_pretrained(args.model_tokenizer).vocab_size
-    cfg = KGWConfig(vocab_size=vocab_size, hash_key=key.hash_key, gamma=args.gamma)
-    print(f"vocab_size={vocab_size} gamma={args.gamma} key_id={key.key_id} z_threshold={args.z_threshold}")
-
-    try:
-        corpus_specs = [parse_corpus_arg(c) for c in args.corpus]
-    except argparse.ArgumentTypeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
+    score_fn(text: str) -> an object exposing .z_score, .p_value,
+    .prediction, and a scored-position count (see `num_scored_attr`
+    dispatch below) -- raises ValueError on too-short input, exactly like
+    both `vllm_watermark.kgw.detector.detect_text` and
+    `vllm_watermark.synthid.detector.detect_text`.
+    """
     corpora_report: dict[str, dict] = {}
 
     for label, path in corpus_specs:
@@ -263,14 +295,16 @@ def main(argv: "list[str] | None" = None) -> int:
             # negative class for FPR -- see module docstring.
 
             try:
-                result = detect_text(
-                    text, tokenizer, cfg, ignore_repeated_ngrams=True, z_threshold=args.z_threshold
-                )
+                result = score_fn(text)
             except ValueError:
                 skipped_too_short += 1
                 continue
 
-            if result.num_tokens_scored < args.min_tokens:
+            num_scored = getattr(result, "num_tokens_scored", None)
+            if num_scored is None:
+                num_scored = getattr(result, "num_scored")
+
+            if num_scored < min_tokens:
                 excluded_min_tokens += 1
                 continue
 
@@ -278,8 +312,7 @@ def main(argv: "list[str] | None" = None) -> int:
                 {
                     "z_score": result.z_score,
                     "p_value": result.p_value,
-                    "num_tokens_scored": result.num_tokens_scored,
-                    "num_green": result.num_green,
+                    "num_scored": num_scored,
                     "prediction": result.prediction,
                     "ground_truth": ground_truth,
                 }
@@ -291,7 +324,7 @@ def main(argv: "list[str] | None" = None) -> int:
 
         length_bucket_stats = {}
         for bucket_name, predicate in LENGTH_BUCKETS:
-            bucket_rows = [r for r in included if predicate(r["num_tokens_scored"])]
+            bucket_rows = [r for r in included if predicate(r["num_scored"])]
             bucket_pos = [r for r in bucket_rows if r["ground_truth"] == "on"]
             bucket_neg = [r for r in bucket_rows if r["ground_truth"] == "off"]
             length_bucket_stats[bucket_name] = {
@@ -322,25 +355,23 @@ def main(argv: "list[str] | None" = None) -> int:
             "rows": included,
         }
 
-        n_str = len(included)
         print(
-            f"  n={n_str} (skipped_no_text={skipped_no_text} "
+            f"  n={len(included)} (skipped_no_text={skipped_no_text} "
             f"skipped_too_short={skipped_too_short} excluded_min_tokens={excluded_min_tokens})"
         )
 
-    out_stem = _strip_known_suffix(args.out)
+    return corpora_report
+
+
+def _fmt(x, digits=3):
+    return "n/a" if x is None else f"{x:.{digits}f}"
+
+
+def write_report(title: str, config_summary: dict, corpora_report: dict, out_stem: str) -> "tuple[str, str]":
+    """Render corpora_report (as produced by score_corpora) to <out_stem>.md
+    and <out_stem>.json. Returns (md_path, json_path)."""
     md_path = f"{out_stem}.md"
     json_path = f"{out_stem}.json"
-
-    config_summary = {
-        "model_tokenizer": args.model_tokenizer,
-        "vocab_size": vocab_size,
-        "gamma": args.gamma,
-        "key_id": key.key_id,
-        "z_threshold": args.z_threshold,
-        "min_tokens": args.min_tokens,
-        "corpora": [{"label": label, "path": path} for label, path in corpus_specs],
-    }
 
     Path(md_path).parent.mkdir(parents=True, exist_ok=True)
     Path(json_path).parent.mkdir(parents=True, exist_ok=True)
@@ -348,17 +379,13 @@ def main(argv: "list[str] | None" = None) -> int:
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump({"config": config_summary, "corpora": corpora_report}, f, indent=2)
 
-    md_lines = ["# KGW detection report", ""]
+    md_lines = [f"# {title}", ""]
     md_lines.append(
-        f"model_tokenizer=`{args.model_tokenizer}` vocab_size={vocab_size} gamma={args.gamma} "
-        f"key_id=`{key.key_id}` z_threshold={args.z_threshold} min_tokens={args.min_tokens}"
+        " ".join(f"{k}=`{v}`" for k, v in config_summary.items() if k != "corpora")
     )
     md_lines.append("")
     md_lines.append("| corpus | n | mean z | median z | min z | max z | TPR (z>=thr, watermark=on) | FPR (z>=thr, watermark=off/human) |")
     md_lines.append("|---|---|---|---|---|---|---|---|")
-
-    def _fmt(x, digits=3):
-        return "n/a" if x is None else f"{x:.{digits}f}"
 
     for label, stats in corpora_report.items():
         md_lines.append(
@@ -398,8 +425,113 @@ def main(argv: "list[str] | None" = None) -> int:
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(md_lines) + "\n")
 
-    print(f"wrote {md_path}")
-    print(f"wrote {json_path}")
+    return md_path, json_path
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    args = build_parser().parse_args(argv)
+    print(f"vllm_watermark import: {_IMPORT_NOTE}")
+
+    try:
+        from transformers import AutoConfig, AutoTokenizer
+    except ImportError as exc:
+        print(
+            f"error: this script requires transformers (local-only tool): {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        key = load_key(key_id=args.key_id)
+    except (RuntimeError, KeyError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Loading tokenizer/config {args.model_tokenizer!r} ...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_tokenizer)
+    vocab_size = AutoConfig.from_pretrained(args.model_tokenizer).vocab_size
+
+    try:
+        corpus_specs = [parse_corpus_arg(c) for c in args.corpus]
+    except argparse.ArgumentTypeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    out_stem = _strip_known_suffix(args.out)
+
+    if args.scheme == "kgw":
+        cfg = KGWConfig(vocab_size=vocab_size, hash_key=key.hash_key, gamma=args.gamma)
+        print(f"vocab_size={vocab_size} gamma={args.gamma} key_id={key.key_id} z_threshold={args.z_threshold}")
+
+        def score_fn(text: str):
+            return detect_text(text, tokenizer, cfg, ignore_repeated_ngrams=True, z_threshold=args.z_threshold)
+
+        corpora_report = score_corpora(corpus_specs, score_fn, args.z_threshold, args.min_tokens)
+
+        config_summary = {
+            "scheme": "kgw",
+            "model_tokenizer": args.model_tokenizer,
+            "vocab_size": vocab_size,
+            "gamma": args.gamma,
+            "key_id": key.key_id,
+            "z_threshold": args.z_threshold,
+            "min_tokens": args.min_tokens,
+            "corpora": [{"label": label, "path": path} for label, path in corpus_specs],
+        }
+        md_path, json_path = write_report("KGW detection report", config_summary, corpora_report, out_stem)
+        print(f"wrote {md_path}")
+        print(f"wrote {json_path}")
+        return 0
+
+    # --scheme synthid
+    if synthid_detector is None or SynthIDConfig is None:
+        print(
+            f"error: --scheme synthid requires vllm_watermark.synthid, which failed to import: "
+            f"{_SYNTHID_IMPORT_ERROR}",
+            file=sys.stderr,
+        )
+        return 2
+
+    depth = args.synthid_depth or DEFAULT_SYNTHID_DEPTH
+    synthid_keys = key.derive_subkeys(depth, _SYNTHID_KEY_LABEL)
+    synthid_cfg = SynthIDConfig(
+        vocab_size=vocab_size,
+        keys=synthid_keys,
+        ngram_len=args.synthid_ngram_len,
+    )
+    print(
+        f"vocab_size={vocab_size} depth={depth} ngram_len={args.synthid_ngram_len} "
+        f"key_id={key.key_id} z_threshold={args.z_threshold}"
+    )
+
+    for scorer in SYNTHID_SCORERS:
+
+        def score_fn(text: str, _scorer=scorer):
+            return synthid_detector.detect_text(
+                text, tokenizer, synthid_cfg, scorer=_scorer, z_threshold=args.z_threshold
+            )
+
+        print(f"-- scorer={scorer} --")
+        corpora_report = score_corpora(corpus_specs, score_fn, args.z_threshold, args.min_tokens)
+
+        config_summary = {
+            "scheme": "synthid",
+            "scorer": scorer,
+            "model_tokenizer": args.model_tokenizer,
+            "vocab_size": vocab_size,
+            "depth": depth,
+            "ngram_len": args.synthid_ngram_len,
+            "key_id": key.key_id,
+            "z_threshold": args.z_threshold,
+            "min_tokens": args.min_tokens,
+            "corpora": [{"label": label, "path": path} for label, path in corpus_specs],
+        }
+        md_path, json_path = write_report(
+            f"SynthID detection report (scorer={scorer})", config_summary, corpora_report, f"{out_stem}_{scorer}"
+        )
+        print(f"wrote {md_path}")
+        print(f"wrote {json_path}")
+
     return 0
 
 

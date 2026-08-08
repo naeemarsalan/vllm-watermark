@@ -21,6 +21,19 @@ docstring, "Per-request vllm_xargs / SamplingParams.extra_args keys this
 processor recognizes". Sending it explicitly here just makes every corpus
 row self-documenting about which key_id it was generated with.
 
+Optional --scheme {kgw,synthid} adds a `watermark_scheme` key to
+`vllm_xargs` (per src/vllm_watermark/request_args.py's
+KNOWN_WATERMARK_XARGS / SCHEME-COORDINATION DESIGN) so the corpus is
+labeled with which loaded processor should bias it. When --scheme is
+omitted, `vllm_xargs` is built EXACTLY as before (no `watermark_scheme`
+key at all) -- byte-identical to pre-existing behavior, letting the
+server's VLLM_WATERMARK_SCHEME default apply. `--scheme` is only sent
+with --watermark on (a `watermark_scheme` value is meaningless -- and
+would be silently ignored server-side -- when watermark is off), mirroring
+--key-id's existing on-only behavior. The resulting row also records
+`"scheme"` (the --scheme value, or null if omitted) for downstream
+comparison tooling (see benchmarks/compare_schemes.py).
+
 Usage:
     python3 benchmarks/gen_corpus.py \\
         --model Qwen/Qwen2.5-0.5B-Instruct \\
@@ -107,6 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="watermark_key_id to request (default: 'default'); only sent with --watermark on",
     )
+    parser.add_argument(
+        "--scheme",
+        choices=["kgw", "synthid"],
+        default=None,
+        help=(
+            "watermark_scheme to request; only sent with --watermark on. "
+            "Omitted by default -- vllm_xargs then carries no watermark_scheme "
+            "key at all, preserving prior byte-identical behavior."
+        ),
+    )
     parser.add_argument("--out", default="corpus.jsonl")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", "EMPTY"))
@@ -143,14 +166,24 @@ def main(argv: "list[str] | None" = None) -> int:
     # name (WATERMARK_KEY_ID env or "default" -- see src/vllm_watermark/
     # keys.py), so an omitted --key-id still resolves to a real,
     # reproducibly-labeled key on the server side.
+    if args.scheme and args.watermark == "off":
+        print(
+            "warning: --scheme given with --watermark off; it will not be sent "
+            "(a scheme only applies when watermark is on)",
+            file=sys.stderr,
+        )
+
     effective_key_id = args.key_id or "default"
     vllm_xargs: dict = {"watermark": args.watermark}
     if args.watermark == "on":
         vllm_xargs["watermark_key_id"] = effective_key_id
+        if args.scheme:
+            vllm_xargs["watermark_scheme"] = args.scheme
 
     print(
         f"Generating corpus: {len(work_prompts)} completions -> {url} "
-        f"(watermark={args.watermark} key_id={effective_key_id if args.watermark == 'on' else None})"
+        f"(watermark={args.watermark} key_id={effective_key_id if args.watermark == 'on' else None} "
+        f"scheme={args.scheme if args.watermark == 'on' else None})"
     )
 
     n_ok = 0
@@ -197,6 +230,7 @@ def main(argv: "list[str] | None" = None) -> int:
                 "completion_tokens": completion_tokens,
                 "watermark": args.watermark,
                 "key_id": effective_key_id if args.watermark == "on" else None,
+                "scheme": args.scheme if args.watermark == "on" else None,
                 "model": args.model,
                 "temperature": args.temperature,
                 "request_ms": request_ms,
