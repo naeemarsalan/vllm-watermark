@@ -3,7 +3,7 @@
 ## OpenShift on AWS with optional GPU capacity
 
 This workspace provisions an OpenShift 4.20 cluster named `ocp-ai` in `us-east-1`
-under `sandbox1392.opentlc.com`. Generated installer assets and credentials are
+under the sandbox base domain (recorded in the local, gitignored `aws` file). Generated installer assets and credentials are
 excluded from Git (`aws`, `cluster/` — see `.gitignore`; never commit them).
 
 The initial cluster uses three `m6i.xlarge` control-plane nodes and three

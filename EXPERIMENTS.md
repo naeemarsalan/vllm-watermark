@@ -8,7 +8,7 @@ Secrets are redacted as `[REDACTED]`. Newest entries at the bottom.
 
 ## 2026-08-08 — Phase 0 infrastructure bring-up (ocp-ai cluster)
 
-**Environment:** OpenShift 4.20 `ocp-ai` (api.ocp-ai.sandbox1392.opentlc.com), local
+**Environment:** OpenShift 4.20 `ocp-ai` (api.ocp-ai.<redacted-sandbox-domain>), local
 workstation `oc` with `KUBECONFIG=cluster/auth/kubeconfig`.
 
 ### GPU node scale-up
