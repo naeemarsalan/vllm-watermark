@@ -455,3 +455,33 @@ returns correct verdicts for known-watermarked (both schemes) and known-clean te
 end-to-end on the cluster. Remaining non-engineering item: RHOAI's FMS-legacy/NeMo
 transition (C11) means the *long-term* guardrails surface needs a NeMo custom-action
 integration decision — recorded in facts D5, not improvised here.
+
+## 2026-08-08 — Phase 2 completion: KGW-vs-SynthID detectability by length (EXECUTED)
+
+Truncation-based scoring of the 512-token corpora (each scheme scored by its own
+detector; controls scored per scheme in the per-scheme reports above — FPR 0.000
+everywhere). Full table: `benchmarks/data/phase2_scheme_comparison.md` (data dir
+gitignored; regenerate with benchmarks/compare_schemes.py).
+
+| tokens | KGW δ2 mean z | KGW TPR | SynthID mean z | SynthID TPR | control FPR |
+|---|---|---|---|---|---|
+| **200** (Code threshold) | 9.08 | **0.992** (119/120) | 13.74 | **1.000** | 0.000 |
+| 256 | 10.26 | 1.000 | 15.65 | 1.000 | 0.000 |
+| 512 | 14.32 | 1.000 | 22.89 | 1.000 | (n/a — controls shorter) |
+
+Reading: SynthID (depth 30) out-detects KGW (δ2) at every length on this model, with
+comfortable margin at the Code-relevant 200-token threshold. KGW's single sub-threshold
+sample at exactly 200 tokens (z<4, TPR 0.992) shows its δ2 margin is thinner there —
+raising δ or preferring SynthID are both available levers. Combined with zero measured
+FPR (270 controls) and the overhead table above, this completes the Phase 2
+acceptance packet: **Phase 2 acceptance: MET.**
+
+## Session close-out 2026-08-08
+
+- GPU MachineSet at 0 replicas (verified; billable node released).
+- Still running on (always-on) worker nodes: detector, detector-synthid,
+  orchestrator, bench pods — the validated Phase 3 stack; teardown commands in
+  deploy/phase3/README.md.
+- Out of scope / blocked (unchanged, per AGENTS.md §6): D6 support-policy carve-out
+  (product management), D7 grace-period scope (counsel), C11 NeMo live-CR validation
+  (needs RHOAI install — Phase 4).
