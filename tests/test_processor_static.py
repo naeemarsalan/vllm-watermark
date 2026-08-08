@@ -9,8 +9,8 @@ into `sys.modules` (or leaves real vLLM in place if it's actually
 installed) BEFORE this file is collected -- see that module's docstring for
 the full rationale (shared, not duplicated, with
 `test_synthid_processor_static.py`). Everything else in this file
-(KGWConfig, greenlist_ids, WatermarkKey, load_key/load_keys) is the real
-real, non-stubbed code: this file is a wiring test for processor.py, not a
+(KGWConfig, greenlist_ids, WatermarkKey, load_key/load_keys) is the real,
+non-stubbed code: this file is a wiring test for processor.py, not a
 reimplementation of the algorithm-equivalence tests (see
 tests/test_kgw_equivalence.py for those).
 
