@@ -139,7 +139,7 @@ single sample per condition (no averaging, no warm-up runs). In real vLLM deploy
 on GPU, published KGW-family and SynthID overhead figures are typically in the low
 single-digit percent range for throughput because the green-list computation is cheap
 relative to a GPU forward pass; the ~48% figure here is a CPU-only, unwarmed,
-small-N artifact and should be described to the customer as "logits-processor-based
+small-N artifact and should be communicated as "logits-processor-based
 watermarking adds measurable but small per-token compute overhead; exact figures
 depend on hardware, batch size, and model size — validate on target hardware," not as
 a hard number.
@@ -206,7 +206,7 @@ detector in transformers/the `google-deepmind/synthid-text` research repo is a
 That training step was explicitly out of scope for this 15-minute CPU proof (per task
 instructions) — this section only demonstrates that the **generation-side** API exists
 and runs in the installed transformers version. This is a materially higher
-operational burden than KGW/green-list detection and should be flagged to the customer
+operational burden than KGW/green-list detection and should be flagged
 as a roadmap/complexity consideration if they want image/video (SynthID-style)
 watermarking later, versus the simpler KGW approach viable for text today.
 
