@@ -136,6 +136,11 @@ spec:
         initialDelaySeconds: 60
         periodSeconds: 10
         failureThreshold: 60
+        # 5s not the 1s default: /health lives in the APIServer process; under
+        # sustained watermarked load the node's 3.5 CPUs are saturated by the
+        # greenlist computation and a 1s probe deadline produces false kills
+        # (EXECUTED: liveness-kill mid-benchmark, EXPERIMENTS.md 2026-08-08).
+        timeoutSeconds: 5
       livenessProbe:
         # Looser than readiness: once Ready, only kill the pod if /health
         # has been failing for a while (model load already succeeded by
@@ -147,6 +152,7 @@ spec:
         initialDelaySeconds: 120
         periodSeconds: 30
         failureThreshold: 5
+        timeoutSeconds: 10
   volumes:
     - name: models-cache
       emptyDir:

@@ -148,6 +148,13 @@ spec:
         # negative-test protocol in docs/implementation.md Phase 1.
         - name: VLLM_WATERMARK_DEFAULT
           value: "on"
+        # Greenlist LRU memo (pure memoization, identical outputs). Measured on
+        # A10G/Qwen2.5-0.5B at concurrency 4 (EXPERIMENTS.md 2026-08-08):
+        # uncached 280.6 tok/s, 1024 entries 444.8 tok/s; 8192 entries measured
+        # within noise of 1024 (partial run) while costing ~2.4GiB more RAM,
+        # so 1024 is the default.
+        - name: VLLM_WATERMARK_CACHE_SIZE
+          value: "1024"
         - name: WATERMARK_KEY
           valueFrom:
             secretKeyRef:
@@ -191,6 +198,11 @@ spec:
         initialDelaySeconds: 60
         periodSeconds: 10
         failureThreshold: 60
+        # 5s not the 1s default: /health lives in the APIServer process; under
+        # sustained watermarked load the node's 3.5 CPUs are saturated by the
+        # greenlist computation and a 1s probe deadline produces false kills
+        # (EXECUTED: liveness-kill mid-benchmark, EXPERIMENTS.md 2026-08-08).
+        timeoutSeconds: 5
       livenessProbe:
         httpGet:
           path: /health
@@ -201,6 +213,7 @@ spec:
         initialDelaySeconds: 300
         periodSeconds: 30
         failureThreshold: 5
+        timeoutSeconds: 10
   volumes:
     - name: models-cache
       emptyDir:

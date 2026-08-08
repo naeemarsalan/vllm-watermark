@@ -172,3 +172,134 @@ benchmarks/analyze_detection.py: watermarked n=25 mean z=27.74 TPR=1.0;
 unwatermarked n=25 mean z=0.56 FPR=0.0; human corpus n=150 mean z=0.19 FPR=0.0
 (report: benchmarks/data/smoke_report.md — data files gitignored). This validates the
 detector/analysis tooling only — NOT `vllm serve` (that is Phase 1's job).
+
+## 2026-08-08 — End-of-session GPU scale-down (EXECUTED)
+
+**Environment:** OpenShift 4.20 `ocp-ai`, local `oc` with
+`KUBECONFIG=cluster/auth/kubeconfig`.
+
+The live MachineSet check showed one desired/current/ready GPU node. Per the repository's
+billable-resource rule, it was scaled down before the session ended:
+
+```
+$ ./scripts/scale-gpu.sh 0
+machineset.machine.openshift.io/ocp-ai-p9j4n-gpu-us-east-1a scaled
+
+$ oc -n openshift-machine-api get machineset ocp-ai-p9j4n-gpu-us-east-1a \
+    -o custom-columns=NAME:.metadata.name,DESIRED:.spec.replicas,CURRENT:.status.replicas,READY:.status.readyReplicas \
+    --no-headers
+ocp-ai-p9j4n-gpu-us-east-1a   0     0     <none>
+```
+
+This proves the billable GPU MachineSet had reached desired/current replica count zero at
+the end of this session. It does not add any watermarking or serving result.
+
+## 2026-08-08 — Evidence qualification for the local pipeline smoke
+
+The earlier “Pipeline smoke (EXECUTED, local, no vLLM)” paragraph records only a prose
+summary. Its command, raw output, and referenced gitignored report were not preserved in
+this repository. Under the repository's verification rules, those numerical rates do
+**not** qualify as `EXECUTED` publication evidence. Fact B22 is therefore `OPEN` until a
+fresh run records its environment, command, and raw output in this append-only log. This
+qualification does not alter the separately preserved 34-test suite result.
+
+## 2026-08-08 — Phase 1: KGW watermark end-to-end through `vllm serve` (EXECUTED — closes D1)
+
+**Environment:** pod `vllm-watermark` (manifest `deploy/phase0/vllm-watermark-pod.yaml`),
+image `vllm/vllm-openai@sha256:c32358eb…` (v0.18.0), engine `v0.18.0`, model
+`Qwen/Qwen2.5-0.5B-Instruct` (vocab_size 151936), A10G. Plugin injected as a wheel
+(pip install --no-deps --target; PYTHONPATH), loaded via
+`--logits-processors vllm_watermark.kgw.processor:KGWLogitsProcessor` (log-verified in
+`non-default args`). Key: k8s Secret → `WATERMARK_KEY` env, key_id `poc-2026-08`
+(64-bit hash key derived via sha256; secret material in gitignored `cluster/`, never
+committed or logged). KGW params: gamma 0.25, delta 2.0, lefthash, context_width 1.
+`VLLM_WATERMARK_DEFAULT=on`.
+
+### Per-request control + validation (EXECUTED)
+
+Through `/v1/completions` from the in-cluster bench pod:
+- default (no vllm_xargs) → watermarked; `{"watermark":"off"}` → not; `{"watermark":"on","watermark_key_id":"poc-2026-08"}` → watermarked.
+- `{"watermark":"banana"}` → HTTP 400 `watermark must be 'on'/'off' (or a boolean), got 'banana'`
+- `{"watermark_key_idz":"x"}` → HTTP 400 `Unknown watermark_* extra_args key(s) ['watermark_key_idz']…`
+- `{"watermark_key_id":"no-such-key"}` → HTTP 400 `…not found among configured keys: ['poc-2026-08']`
+(validate_params → ValueError → BadRequestError chain works exactly as the STATIC
+api-notes predicted.)
+
+### Detection statistics (EXECUTED)
+
+Corpora generated through the server (120 wm-on / 120 wm-off at temp 0.7, 40 wm-on at
+temp 0.0, 256 max tokens, prompts `benchmarks/prompts.txt`), plus 150 human Gutenberg
+chunks. Scored locally (CPU detector, `ignore_repeated_ngrams=True`, z≥4.0):
+
+| corpus | n | mean z | median | min | max | TPR@z≥4 | FPR@z≥4 |
+|---|---|---|---|---|---|---|---|
+| watermarked (T=0.7) | 120 | 21.35 | 21.67 | 15.01 | 25.17 | **1.000** | — |
+| unwatermarked (T=0.7) | 120 | −0.08 | −0.19 | −1.68 | 2.58 | — | **0.000** |
+| watermarked (T=0.0) | 40 | 20.60 | 21.05 | 13.09 | 23.34 | **1.000** | — |
+| human (Gutenberg) | 150 | 0.03 | −0.04 | −2.69 | 3.13 | — | **0.000** |
+
+Full report: `benchmarks/data/phase1_report.md` (data files gitignored; regenerate via
+benchmarks/gen_corpus.py + analyze_detection.py). Detector CLI spot-checks: watermarked
+sample z=25.40 (p=1.2e-142), human sample z=−1.30 — JSON outputs captured above in
+session; commands: `python -m vllm_watermark.cli detect --model-tokenizer
+Qwen/Qwen2.5-0.5B-Instruct --key-id poc-2026-08 --file <sample> --json`.
+
+**Negative-test surprises, recorded honestly:**
+- **Temperature 0 did NOT degrade KGW at delta 2.0 on this model** (mean z 20.6 vs
+  21.3 at T=0.7). Greedy argmax still flips to green wherever the model's logit margin
+  < delta. The literature-derived expectation (facts B18) holds for entropy-carried
+  schemes/low delta; for KGW additive bias on this small model it does not. Quality
+  impact of delta under greedy decoding remains unmeasured (Phase 5).
+- **Structured output composes and retains signal:** 8 guided_json completions
+  (temp 0.7) all detected — mean z 14.5, min 11.2 (vs ~21 free-form). These outputs
+  contained prose-heavy JSON fields; stricter low-entropy schemas will do worse (B9
+  ordering unchanged: grammar mask applies before our processor).
+
+### Spec-decode incompatibility (EXECUTED — B7 upgraded)
+
+Pod with `--speculative-config '{"method":"ngram","num_speculative_tokens":3,
+"prompt_lookup_max":4}'` + `--logits-processors …` fails at engine start:
+
+```
+(EngineCore pid=70) ERROR …     raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
+(EngineCore pid=70) ValueError: Custom logits processors are not supported when speculative decoding is enabled.
+```
+
+Note: raised before the plugin module is even imported (the plugin wheel was not
+installed in that pod) — the rejection precedes processor loading.
+
+### Overhead (EXECUTED — D2 partially closed: one config measured)
+
+Same protocol as Phase 0 (100 req, 256 tok, T=0.7, concurrency 4, in-cluster):
+
+| configuration | agg. output tok/s | p50 | p95 | vs baseline |
+|---|---|---|---|---|
+| Phase 0 baseline (no plugin) | 904.35 | 1.117s | 1.126s | — |
+| plugin loaded, watermark off | 914.62 | 1.114s | 1.119s | **~0% (noise)** |
+| watermark on, no cache | 280.57 | 3.640s | 3.694s | **3.22× slower** |
+| watermark on, LRU cache 1024 | 444.83 | 2.275s | 2.626s | **2.03× slower** |
+
+Active-path cost is CPU `torch.randperm(151936)` (~7 ms/call measured locally,
+`benchmarks/bench_greenlist.py`) once per watermarked row per decode step. The LRU
+memo (pure memoization keyed `(hash_key, prev_token)` — bit-identical outputs, unit
+test `test_greenlist_cache_identical_and_lru`) recovers ~59%. An 8192-entry cache
+measured within noise of 1024 on partial data while the pod died mid-run (below) —
+default stays 1024. Remaining overhead is a Phase 5 optimization target (candidates:
+thread-pool across rows, int32 storage, pinned-memory async copies).
+
+### Operational friction found by execution (all fixed in manifests)
+
+1. **Liveness-probe kill under load:** with the 1s default probe timeout, sustained
+   watermark-on load starved `/health` (CPU-bound greenlist work) → kubelet killed the
+   pod mid-benchmark (exit 137, explicit `Killing` event). Fix: probe
+   `timeoutSeconds` 5 (readiness) / 10 (liveness), liveness `initialDelaySeconds` 300.
+2. **External GPU scale-down automation:** at ~03:00Z the sandbox scaled the GPU
+   MachineSet to 0 (no ClusterAutoscaler/MachineAutoscaler exists; no in-cluster
+   cronjob; machine-api events show drain+delete). The node — and the pod on it —
+   vanished mid-session. Assume the g5 node can disappear at any hour boundary;
+   re-scale with `./scripts/scale-gpu.sh 1` and re-inject. (Suspected trigger: sandbox
+   cost automation, possibly keyed on the `openshift-ai-node=gpu` AWS tag.)
+
+**Phase 1 acceptance: MET.** Clean statistical separation end-to-end through
+`vllm serve` (TPR 1.000, FPR 0.000, human max z 3.13 < 4); overhead quantified
+(table above); per-request control validated; negative tests executed verbatim.
