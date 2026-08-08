@@ -38,6 +38,37 @@ vLLM's V1 engine exposes a documented plugin API for custom logits processors �
 
 **Upstream watermarking activity: none.** No RFC, issue, PR, or discussion in vllm-project for content watermarking (exhaustive `gh` search across issues/PRs/code/discussions, 2026-08-07; `vllm-project/rfcs` is an empty repo). `OFFICIAL-SRC`
 
+<a id="what-changes-where"></a>
+### What changes where: nothing on the model, everything in serving config
+
+The model weights, files, and checkpoints stay untouched — no fine-tuning, no conversion. Decode-time watermarking hooks the serving layer after the model computes logits and before the sampler picks a token, which is why it works identically for any model vLLM serves. The integration surface is three pieces:
+
+**1. A package in the runtime image (the only real "change").** The watermark logits processor is a small pip-installable Python package that must be importable inside the vLLM container. On OpenShift AI that means a custom runtime image: the Red Hat vLLM base image + `pip install` of the plugin (see [openshift-ai.md](openshift-ai.md) — this is the piece with the open supportability question, D6).
+
+**2. vLLM launch config.** One flag (or nothing at all, if the package registers a `vllm.logits_processors` entry point, which vLLM auto-discovers):
+
+```yaml
+# InferenceService / ServingRuntime args on RHOAI
+args:
+  - --logits-processors=vllm_watermark.KGWLogitsProcessor
+```
+
+Plus the watermark key mounted from a Secret into an env var. Constraint: speculative decoding cannot be enabled alongside it — vLLM refuses to start with both (B7).
+
+**3. Optionally, per-request control from the client.** With the server-wide processor loaded, individual requests can pass parameters through the standard OpenAI API:
+
+```python
+client.chat.completions.create(
+    model="llama-3-8b",
+    messages=[...],
+    extra_body={"vllm_xargs": {"watermark": "on", "key_id": "app-a"}},
+)
+```
+
+If a request sends nothing, the processor applies its default (which you'd set to "on" for compliance). Gateway pass-through of `vllm_xargs` on RHOAI is unverified until Phase 4 (C8).
+
+**Second-order consequences (not changes, but plan for them):** sampling settings matter — temperature 0/greedy leaves almost no entropy to embed the mark in, so generation configs pinned to greedy decoding need revisiting; and each scheme has a quality/detectability knob (KGW's bias δ trades detectability against output quality; SynthID's non-distortionary mode avoids that trade at the cost of a more complex detector). The detector runs entirely outside the serving path — a separate service sharing the key; generation never depends on it.
+
 <a id="plugin-assessments"></a>
 ## 2. Plugin assessments (hands-on, 2026-08-07)
 
