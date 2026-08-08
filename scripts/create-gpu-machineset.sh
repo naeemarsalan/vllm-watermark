@@ -42,6 +42,7 @@ oc -n openshift-machine-api get machineset "$source_machineset" -o json \
       | .spec.selector.matchLabels["machine.openshift.io/cluster-api-machineset"] = $name
       | .spec.template.metadata.labels["machine.openshift.io/cluster-api-machineset"] = $name
       | .spec.template.metadata.labels["node-role.kubernetes.io/gpu"] = ""
+      | .spec.template.spec.metadata.labels["node-role.kubernetes.io/gpu"] = ""
       | .spec.template.spec.providerSpec.value.instanceType = $instance_type
       | .spec.template.spec.providerSpec.value.tags = ((.spec.template.spec.providerSpec.value.tags // []) + [{"name":"openshift-ai-node","value":"gpu"}] | unique_by(.name))
     ' \
