@@ -127,14 +127,41 @@ spec:
             - name: WATERMARK_VOCAB_SIZE
               value: "151936"
             # Default scheme for the generic `/api/v1/text/contents` route
-            # and for `/v1/watermark/detect` when no `scheme` is given. Also
-            # doubles as the practical default for the orchestrator's
-            # `watermark-kgw` DetectorConfig entry -- see orchestrator.yaml
-            # "Scheme wiring" for why `watermark-synthid` callers MUST pass
-            # `detector_params.scheme: synthid` explicitly rather than
-            # relying on this default.
+            # and for `/v1/watermark/detect` when no `scheme` is given. Scheme
+            # authority is server-side: the orchestrator's `watermark-kgw`
+            # entry routes to THIS Deployment and `watermark-synthid` to the
+            # dedicated detector-synthid Deployment (its copy of this env is
+            # `synthid`), so callers need no scheme params;
+            # `detector_params.scheme` stays available as an override.
             - name: WATERMARK_DETECTOR_SCHEME
               value: "kgw"
+            # JWS result signing — an engineering/auditability choice: a
+            # verifier can prove a verdict came from this detector and was
+            # not altered. (Whether any legal measure REQUIRES signed
+            # detection results is an OPEN question pending an exact quote
+            # in docs/quotes.md — see docs/implementation.md; do not cite
+            # this feature as a compliance requirement.)
+            # Key: Secret detector-signing-key,
+            # created per deploy/phase3/README.md §"Signing key" — REQUIRED
+            # by this manifest; app.py fails loudly at startup if the path
+            # is set but unreadable (deliberate: a misconfigured signing key
+            # is a deployment bug, an absent SIGNING_KEY_PATH env would be
+            # silent-unsigned dev mode).
+            - name: SIGNING_KEY_PATH
+              value: /etc/signing/signing.pem
+            # Sourced from the SAME Secret as the key material so the id and
+            # the key rotate together and cannot drift. REQUIRED (no
+            # `optional:`): this manifest makes signing mandatory and
+            # detector/app.py has NO default kid — an absent SIGNING_KEY_ID
+            # would silently emit JWS tokens without a `kid` header, which
+            # defeats key-rotation verification. The runbook's
+            # `oc create secret ... --from-literal=SIGNING_KEY_ID=...`
+            # creates this key alongside the PEM.
+            - name: SIGNING_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: detector-signing-key
+                  key: SIGNING_KEY_ID
           resources:
             # Exactly the sizing given in the task brief (tokenizer + torch
             # CPU, no model weights loaded): cpu 1 / mem 2Gi request, 4Gi
@@ -153,19 +180,20 @@ spec:
           volumeMounts:
             - name: hf-cache
               mountPath: /tmp/hf
+            - name: signing-key
+              mountPath: /etc/signing
+              readOnly: true
           # /ready (per task brief) -- detector/app.py: 503 until BOTH the
           # tokenizer has loaded (`AutoTokenizer.from_pretrained`, needs
           # network egress to huggingface.co on every pod start, since
           # `hf-cache` is an emptyDir and does not persist across restarts)
           # AND at least one watermark key is configured; 200 with
-          # `key_ids` once both are true. Timing NOT measured by this task
-          # (no pod was started) -- initialDelaySeconds/failureThreshold
-          # below are a conservative starting guess (tokenizer-only
-          # download, no model weights, so this should be materially
-          # faster than deploy/phase0's vLLM pods' 60s+ model-load delay);
-          # tighten or loosen after the first real deploy and record actual
-          # observed time-to-Ready in EXPERIMENTS.md per this repo's
-          # verification discipline.
+          # `key_ids` once both are true. MEASURED (2026-08-08, recorded
+          # deploys): Deployments reached Available within one 15-second
+          # poll interval after `oc apply` in repeated rollouts (image
+          # already in the internal registry; tokenizer-only download) —
+          # the probe settings below are comfortably conservative against
+          # that observation.
           readinessProbe:
             httpGet:
               path: /ready
@@ -198,3 +226,6 @@ spec:
         - name: hf-cache
           emptyDir:
             sizeLimit: 512Mi
+        - name: signing-key
+          secret:
+            secretName: detector-signing-key

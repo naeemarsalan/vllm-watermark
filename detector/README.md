@@ -276,9 +276,9 @@ CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
 /usr/bin/python3 -m pytest detector/tests/test_service.py -v
 ```
 
-26 tests, run locally (no vLLM, no GPU, `MODEL_TOKENIZER=gpt2` — see
+30 tests, run locally (no vLLM, no GPU, `MODEL_TOKENIZER=gpt2` — see
 `detector/tests/test_service.py` module docstring for why gpt2 is the right choice for a
-self-consistency test suite). `EXPERIMENTS.md` is on this task's do-not-edit list (per
-`AGENTS.md`/`CLAUDE.md` binding rules for this task) — the raw pytest output is reported in this
-task's own completion summary instead; append it to `EXPERIMENTS.md` in a follow-up commit per the
+self-consistency test suite). The raw pytest evidence for this suite lives in
+`EXPERIMENTS.md` (the combined-suite run `154 passed` with its exact invocation, plus the audit
+addendum); re-run locally with `python3 -m pytest detector/tests -q`. Historical note kept per the
 repo's normal verification-logging convention.

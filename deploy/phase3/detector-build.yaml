@@ -19,8 +19,8 @@
 #     `BuildConfig.spec.source.type` is `Binary` for these builds. This
 #     source type is unique in that it is leveraged solely based on your use
 #     of the `oc start-build`." Same module documents `--from-dir` as one of
-#     the three `oc start-build` binary-input options (used in this task's
-#     README).
+#     the three `oc start-build` binary-input options (the one this
+#     directory's README uses).
 #   * `spec.strategy.type: Docker` + `spec.strategy.dockerStrategy` --
 #     rest_api/workloads_apis/buildconfig-build-openshift-io-v1.adoc lists
 #     `spec.strategy.dockerStrategy` ("DockerBuildStrategy defines input

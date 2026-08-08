@@ -2,7 +2,7 @@
 
 **EU AI Act Article 50(2) text watermarking for vLLM on OpenShift AI — verified research and implementation workspace.**
 
-Goal: a decode-time text watermarking implementation (generation **and** detection) for LLMs served by vLLM on OpenShift AI, addressing the EU AI Act's machine-readable marking obligation for AI-generated text. The research base carries mixed verification tags in [`docs/facts.md`](docs/facts.md); the OpenShift/vLLM serving baseline and a recorded local KGW package test run are `EXECUTED` in [`EXPERIMENTS.md`](EXPERIMENTS.md). The watermark plugin has **not** yet been proven end to end through `vllm serve` — that is the next implementation milestone (`OPEN`; fact D1).
+Goal: a decode-time text watermarking implementation (generation **and** detection) for LLMs served by vLLM on OpenShift AI, addressing the EU AI Act's machine-readable marking obligation for AI-generated text. The research base carries mixed verification tags in [`docs/facts.md`](docs/facts.md). As of 2026-08-08, KGW and SynthID-Text watermarking are `EXECUTED` end to end through `vllm serve` on the cluster (fact D1 closed; corrected single-instance statistics after the double-load finding — see the correction entry), and the watermark detector service is validated end to end through the FMS Guardrails Orchestrator, all with evidence in [`EXPERIMENTS.md`](EXPERIMENTS.md).
 
 > This repo contains regulatory analysis but is **not legal advice**. Compliance decisions must go through counsel.
 
@@ -35,7 +35,7 @@ Every claim below carries a verification tag defined in [`docs/facts.md`](docs/f
 ### The platform
 
 - **OpenShift AI ships new-enough vLLM.** RHOAI 3.4 (GA): vLLM 0.17.1–0.18.0; RHOAI 3.3: 0.10.1.1.6–0.13.0 — at/above the 0.10.1 plugin-API floor. Per-deployment runtime args and custom ServingRuntime images are documented flows ([details](docs/openshift-ai.md)).
-- **The detection integration target must be reassessed.** The FMS/TrustyAI Guardrails Orchestrator exposes the previously selected detector API, but RHOAI 3.4 now labels FMS Guardrails legacy and directs users to NeMo Guardrails (`OFFICIAL-SRC`; fact C11). Phase 3 will verify the current extension surface before choosing an architecture ([plan](docs/implementation.md)).
+- **The detection integration target must be reassessed.** The FMS/TrustyAI Guardrails Orchestrator exposes the previously selected detector API, but RHOAI 3.4 now labels FMS Guardrails legacy and directs users to NeMo Guardrails (`OFFICIAL-SRC`; fact C11). Phase 3 executed the FMS detector contract end to end (it remains the shipped, documented detector interface) and assessed the NeMo-forward surface ([api-notes](docs/api-notes-nemo-guardrails.md)); the live RHOAI `NemoGuardrails` CR check is Phase 4 work — see fact D5 for exactly what is closed vs open.
 - **Supportability open item:** Red Hat's Container Support Policy does not cover customer-modified product images, and no RHOAI-specific carve-out was found. Needs product-management confirmation before any production commitment.
 
 ---
@@ -46,7 +46,7 @@ Every claim below carries a verification tag defined in [`docs/facts.md`](docs/f
 |---|---|
 | [`docs/facts.md`](docs/facts.md) | Fact register — every claim, its verification status, its source |
 | [`docs/quotes.md`](docs/quotes.md) | Exact verbatim quotes from the legal texts, with provenance |
-| [`docs/technical.md`](docs/technical.md) | vLLM extension point, plugin assessments, watermarking science |
+| [`docs/technical.md`](docs/technical.md) | vLLM extension point, plugin assessments, watermarking science — committed copy predates the Phase 1-3 execution results; see `EXPERIMENTS.md` + `docs/facts.md` for current EXECUTED state |
 | [`docs/openshift-ai.md`](docs/openshift-ai.md) | OpenShift AI / TrustyAI integration facts |
 | [`docs/implementation.md`](docs/implementation.md) | Phased implementation plan with acceptance criteria |
 | [`docs/blog-draft.md`](docs/blog-draft.md) | Mixed-audience, evidence-annotated publication draft |
@@ -66,6 +66,6 @@ Every claim below carries a verification tag defined in [`docs/facts.md`](docs/f
 - [x] KGW package, detector, and benchmark tooling implemented (`STATIC`); 34-test local suite executed at the recorded 2026-08-08 revision (`EXECUTED`; [run record](EXPERIMENTS.md#2026-08-08--vllm_watermark-package-local-test-suite-executed))
 - [x] **Phase 1 — KGW logits processor running under `vllm serve`** (2026-08-08: TPR 1.000 / FPR 0.000 end-to-end on the cluster; overhead quantified; D1 closed — see `EXPERIMENTS.md`)
 - [x] Phase 2 — SynthID-Text generation + detection (2026-08-08: untrained scorers TPR 1.000/FPR 0.000 through `vllm serve`; GPU hot path 2.57ms/tok; D8 closed)
-- [ ] Phase 3 — Detection service + current guardrails-path confirmation
+- [x] Phase 3 — Detection service validated end-to-end through the FMS Guardrails Orchestrator (2026-08-08; correct verdicts incl. cross-scheme negatives, Ed25519-signed results; retention posture: hash-only logging verified in scoped log windows plus stateless/no-data-volume design — not an absolute zero-retention claim; the NeMo library's own 422-echo/event-log retention gap is a separate, recorded open item). Guardrails-path caveat: RHOAI 3.4 marks FMS legacy (C11); the NeMo-forward surface is assessed in docs/api-notes-nemo-guardrails.md with the live RHOAI `NemoGuardrails` CR check deferred to Phase 4 — D5 records exactly what remains open.
 - [ ] Phase 4 — OpenShift AI deployment (custom runtime image + ServingRuntime)
 - [ ] Phase 5 — Benchmarks, robustness tests, hardening

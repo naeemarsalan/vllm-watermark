@@ -104,6 +104,8 @@ oc -n watermark get istag detector:latest
 
 ```bash
 oc apply -f deploy/phase3/detector-deploy.yaml
+oc apply -f deploy/phase3/detector-synthid-deploy.yaml   # synthid-scheme twin; see that file's header
+oc -n watermark wait --for=condition=Available deploy/detector-synthid --timeout=8m
 oc -n watermark wait --for=condition=Available deploy/detector --timeout=5m
 ```
 
@@ -149,12 +151,15 @@ process start (`OrchestratorConfig::load`, `src/main.rs`).
 
 ## 6. Exercise both endpoints
 
-Read `orchestrator.yaml`'s header comment ("Scheme wiring") before running
-these — in short: **`watermark-kgw` works with empty `detector_params`;
-`watermark-synthid` does NOT** — the pinned orchestrator image predates
-`path_prefix`-based routing, so scheme selection for the SynthID detector
-relies entirely on the caller passing `"scheme": "synthid"` explicitly.
-Every example below reflects that.
+Scheme routing is SERVER-SIDE: `watermark-kgw` routes to the kgw-scheme
+`detector` Deployment and `watermark-synthid` to the dedicated
+`detector-synthid` Deployment (each pins `WATERMARK_DETECTOR_SCHEME`), so
+**both detector ids return correct verdicts with empty `detector_params`**
+— verified live 2026-08-08, full matrix in `EXPERIMENTS.md`.
+`detector_params.scheme` remains an optional per-request override (the
+orchestrator forwards non-`threshold` params verbatim). Background: the
+pinned orchestrator image predates `path_prefix` routing, which is exactly
+why the twin-Deployment design exists — see `orchestrator.yaml`'s header.
 
 ### (a) Direct detector endpoint — `/v1/watermark/detect`
 
@@ -173,24 +178,36 @@ curl -s http://localhost:8000/v1/watermark/detect \
   -d '{"text": "<paste a known-watermarked KGW sample here>", "scheme": "kgw"}'
 ```
 
-Expected shape (fields per `detector/app.py::_build_detect_result` —
-`signature`/`signing` are `null`/`"disabled"` unless `SIGNING_KEY_PATH` is
-configured, which this Deployment does not set):
+Expected shape (fields per `detector/app.py::_build_detect_result`).
+BOTH committed Deployments now set `SIGNING_KEY_PATH` from Secret
+`detector-signing-key` (create it FIRST or the pod fails loudly at startup —
+deliberate; see the manifest comment):
+
+```bash
+umask 077
+openssl genpkey -algorithm ed25519 -out signing.pem      # keep OUTSIDE git
+oc -n watermark create secret generic detector-signing-key \
+  --from-file=signing.pem=signing.pem \
+  --from-literal=SIGNING_KEY_ID=<your-key-id>            # id rotates WITH the key
+```
+
+Example below is the actually-captured response for a known-KGW sample
+(EXPERIMENTS.md raw-evidence addendum, 2026-08-08), signature truncated:
 
 ```json
 {
   "scheme": "kgw",
   "key_id": "<your key_id>",
   "verdict": true,
-  "z_score": 21.35,
-  "p_value": 1.2e-101,
+  "z_score": 12.817175976009691,
+  "p_value": 6.569985692499835e-38,
   "score": 1.0,
-  "num_tokens_scored": 254,
+  "num_tokens_scored": 400,
   "detector_version": "vllm-watermark-detector/0.1.0.dev0",
   "model_tokenizer": "Qwen/Qwen2.5-0.5B-Instruct",
-  "scheme_details": {"num_green": 210, "gamma": 0.25},
-  "signature": null,
-  "signing": "disabled"
+  "scheme_details": {"num_green": 211, "gamma": 0.25},
+  "signature": "eyJhbGciOiJFZERTQSIsImI2NCI6ZmFsc2UsImNy…",
+  "signing": "enabled"
 }
 ```
 
@@ -240,8 +257,8 @@ brief's prose):
       "detector_id": "watermark-kgw",
       "score": 1.0,
       "metadata": {
-        "z_score": 21.35,
-        "p_value": 1.2e-101,
+        "z_score": 12.817175976009691,
+        "p_value": 6.569985692499835e-38,
         "key_id": "<your key_id>",
         "scheme": "kgw",
         "num_tokens_scored": 254,
@@ -289,21 +306,17 @@ by this phase, so there is nothing to scale down.
 
 ## Acceptance evidence
 
-This task built and validated manifests only — it did **not** apply
-anything to the cluster (per its brief) and therefore recorded no execution
-evidence. Running the sequence above and confirming (i) a correct verdict
-for known-watermarked KGW text, (ii) a correct verdict for known-watermarked
-SynthID text (with explicit `scheme`), and (iii) an empty/negative result
-for known-clean text, through the ORCHESTRATOR path end to end, is exactly
-Phase 3's acceptance criterion in `docs/implementation.md`
-("the selected, current guardrails path routes a detection request to our
-detector and returns a correct verdict ... demonstrated end-to-end on the
-cluster, with transcripts in `EXPERIMENTS.md`"). **That run, and the
-`EXPERIMENTS.md` entry it produces, is the orchestrator's job, not this
-task's** — do not treat anything in this directory as `EXECUTED` until that
-happens.
+The runbook above was executed end to end on the cluster on 2026-08-08 —
+build, deploys, orchestrator wiring, and the full verdict matrix
+(known-KGW and known-SynthID watermarked text detected by exactly their own
+detector ids with empty params; clean and human text negative on both;
+dual-detector requests attribute correctly). Raw transcripts and the exact
+commands live in `EXPERIMENTS.md` (Phase 3 entry and the raw-evidence
+addendum); this README carries no evidence of its own. Earlier revisions of
+this section described the pre-execution state — see git history for that
+provenance.
 
-## YAML validation (this task)
+## YAML validation
 
 ```bash
 python3 -c "
@@ -314,8 +327,7 @@ for p in sorted(pathlib.Path('deploy/phase3').glob('*.yaml')):
 "
 ```
 
-See this task's returned command output for the actual result of the run
-above (all four manifests + the repo-root `.dockerignore`'s absence of YAML
+Re-run the command above for the current result; it parses all four manifests (all four manifests + the repo-root `.dockerignore`'s absence of YAML
 syntax, since it's a plain-text ignore file, not YAML). This confirms only
 that the files PARSE as valid YAML — it is not a schema validation against
 the BuildConfig/Deployment/ConfigMap/Service OpenAPI schemas (no cluster

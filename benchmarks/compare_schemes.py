@@ -232,21 +232,26 @@ def _run_self_test(args: argparse.ArgumentParser) -> int:
             f.write(json.dumps({"text": word * 600}) + "\n")
 
     tokenizer = FakeTokenizer()
-    corpora_config = {
-        "kgw": (str(kgw_path), fake_watermarked_scorer),
-        "synthid": (None, fake_watermarked_scorer),  # deliberately absent -> "not present" branch
-        "unwatermarked": (str(unwm_path), fake_unwatermarked_scorer),
-        "human": (None, fake_unwatermarked_scorer),  # deliberately absent -> "not present" branch
-    }
+
+    # Two DISTINGUISHABLE fake detectors so the six-row model is actually
+    # proven: the same control corpus must appear once per detector with
+    # that detector's own signature z value (audit fix 2026-08-08).
+    def fake_kgw_det(token_ids):
+        return FakeResult(z_score=0.1, prediction=False)
+
+    def fake_synthid_det(token_ids):
+        return FakeResult(z_score=0.2, prediction=False)
 
     results = {}
-    for label, (path, scorer) in corpora_config.items():
-        if path is None:
-            results[label] = None
-            print(f"[self-test] {label}: {NOT_PRESENT}")
-            continue
-        results[label] = score_corpus_at_lengths(path, tokenizer, scorer, TRUNCATION_LENGTHS)
-        print(f"[self-test] {label}: {results[label]}")
+    results["kgw"] = score_corpus_at_lengths(str(kgw_path), tokenizer, fake_watermarked_scorer, TRUNCATION_LENGTHS)
+    results["synthid"] = None  # deliberately absent -> "not present" row
+    for det_name, scorer in [("kgw det", fake_kgw_det), ("synthid det", fake_synthid_det)]:
+        results[f"unwatermarked ({det_name})"] = score_corpus_at_lengths(
+            str(unwm_path), tokenizer, scorer, TRUNCATION_LENGTHS)
+    results["human (kgw det)"] = None
+    results["human (synthid det)"] = None
+    for label, per in results.items():
+        print(f"[self-test] {label}: {NOT_PRESENT if per is None else 'scored'}")
 
     md_path, json_path = render_report(
         {"self_test": True, "note": "synthetic fixture, not real corpora/detectors"}, results, args.out
@@ -256,20 +261,28 @@ def _run_self_test(args: argparse.ArgumentParser) -> int:
 
     assert results["kgw"] is not None and results["kgw"][200]["n"] == 5, "self-test: kgw@200 should have n=5"
     assert results["synthid"] is None, "self-test: synthid corpus should be absent"
-    assert results["human"] is None, "self-test: human corpus should be absent"
-    for length in TRUNCATION_LENGTHS:
-        assert results["kgw"][length]["rate"] == 1.0, f"self-test: fake watermarked scorer should always predict True at {length}"
-        assert results["unwatermarked"][length]["rate"] == 0.0, f"self-test: fake unwatermarked scorer should never predict True at {length}"
+    assert results["human (kgw det)"] is None, "self-test: absent human corpus -> not-present per detector"
+    assert results["human (synthid det)"] is None
+    assert results["synthid"] is None, "self-test: absent synthid corpus -> not-present"
+    for length in TRUNCATION_LENGTHS:  # all three lengths (200/256/512)
+        a = results["unwatermarked (kgw det)"][length]
+        b = results["unwatermarked (synthid det)"][length]
+        assert a["rate"] == 0.0 and b["rate"] == 0.0, "self-test: control scorers never predict True"
+        assert abs(a["mean_z"] - 0.1) < 1e-9 and abs(b["mean_z"] - 0.2) < 1e-9, (
+            "self-test: same control corpus must be scored by BOTH detectors, "
+            "each with its own signature z (proves six-row routing)")
     print("[self-test] all assertions passed")
     return 0
 
 
 def render_report(config_summary: dict, results: "dict[str, dict | None]", out: str) -> "tuple[str, str]":
     """results: {label: {length: {n, mean_z, rate, ...}} | None (not present)}.
-    label is one of "kgw", "synthid", "unwatermarked", "human". For "kgw"/
-    "synthid" the `rate` at each length is reported as TPR; for
-    "unwatermarked"/"human" it is reported as FPR -- both against that
-    corpus's OWN scheme's detector (see module docstring)."""
+    Labels: "kgw" / "synthid" (watermarked corpora, rate = TPR, scored with
+    that scheme's own detector) and "unwatermarked (kgw det)" /
+    "unwatermarked (synthid det)" / "human (kgw det)" / "human (synthid det)"
+    (control corpora, rate = FPR of the NAMED detector — one row per
+    (corpus, detector) pair so each scheme's FPR is independently supported;
+    audit fix 2026-08-08)."""
     out_stem = out[:-3] if out.endswith(".md") else out
     md_path = f"{out_stem}.md"
     json_path = f"{out_stem}.json"
@@ -280,8 +293,8 @@ def render_report(config_summary: dict, results: "dict[str, dict | None]", out: 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump({"config": config_summary, "results": results}, f, indent=2)
 
-    rate_label = {"kgw": "TPR", "synthid": "TPR", "unwatermarked": "FPR", "human": "FPR"}
-    detector_label = {"kgw": "KGW detector", "synthid": "SynthID (mean) detector", "unwatermarked": "KGW+SynthID detectors", "human": "KGW+SynthID detectors"}
+    def rate_label(label: str) -> str:
+        return "TPR" if label in ("kgw", "synthid") else "FPR"
 
     md_lines = ["# KGW vs SynthID scheme comparison", ""]
     md_lines.append(" ".join(f"{k}=`{v}`" for k, v in config_summary.items()))
@@ -294,11 +307,11 @@ def render_report(config_summary: dict, results: "dict[str, dict | None]", out: 
         md_lines.append("|---|---|---|---|---|")
         for label, per_length in results.items():
             if per_length is None:
-                md_lines.append(f"| {label} | {NOT_PRESENT} | {NOT_PRESENT} | {NOT_PRESENT} | {rate_label.get(label, 'n/a')} |")
+                md_lines.append(f"| {label} | {NOT_PRESENT} | {NOT_PRESENT} | {NOT_PRESENT} | {rate_label(label)} |")
                 continue
             stats = per_length[length]
             md_lines.append(
-                f"| {label} | {stats['n']} | {_fmt(stats['mean_z'])} | {_fmt(stats['rate'])} | {rate_label.get(label, 'n/a')} |"
+                f"| {label} | {stats['n']} | {_fmt(stats['mean_z'])} | {_fmt(stats['rate'])} | {rate_label(label)} |"
             )
         md_lines.append("")
 
@@ -308,10 +321,14 @@ def render_report(config_summary: dict, results: "dict[str, dict | None]", out: 
         "- `kgw`/`synthid` rows: TPR at that scheme's own detection threshold, scored with that scheme's own detector."
     )
     md_lines.append(
-        "- `unwatermarked`/`human` rows: FPR -- scored with BOTH detectors would need two separate runs of this "
-        "script (one per --*-corpus set matching the scheme under test); this report's single pass scores each "
-        "corpus with the detector implied by --kgw-corpus (if given) as the reference scheme unless a caller reruns "
-        "with a different scheme-specific detector wiring."
+        "- `unwatermarked (...)` / `human (...)` rows: FPR of the named detector on that control corpus -- "
+        "one row per (corpus, detector) pair, so each scheme's FPR is independently supported."
+    )
+    md_lines.append(
+        "- n varies by truncation length: a row is scored at length L only if it has >= L scored tokens "
+        "(shorter completions are excluded, counted in n_skipped_too_short in the JSON). Control corpora "
+        "generated/chunked at ~256 tokens therefore have n=0 at the 512 row unless a 512-token control "
+        "corpus is supplied."
     )
     md_lines.append(f"- `{NOT_PRESENT}` cells mean that --*-corpus flag was omitted, not a scoring failure.")
     md_lines.append("")
@@ -357,11 +374,18 @@ def main(argv: "list[str] | None" = None) -> int:
     synthid_scorer = None
     synthid_import_error = None
     try:
-        from vllm_watermark.synthid.core import DEFAULT_SYNTHID_DEPTH, SynthIDConfig
+        from vllm_watermark.synthid.core import DEFAULT_SYNTHID_DEPTH, SYNTHID_KEY_LABEL, SynthIDConfig
         from vllm_watermark.synthid.detector import score_token_ids_mean
 
+        if args.synthid_depth is not None and args.synthid_depth <= 0:
+            print(f"error: --synthid-depth must be a positive integer, got {args.synthid_depth}", file=sys.stderr)
+            return 2
+        if args.synthid_ngram_len < 1:
+            # canonical bound: SynthIDConfig.__post_init__ accepts ngram_len >= 1
+            print(f"error: --synthid-ngram-len must be >= 1, got {args.synthid_ngram_len}", file=sys.stderr)
+            return 2
         depth = args.synthid_depth or DEFAULT_SYNTHID_DEPTH
-        synthid_keys = key.derive_subkeys(depth, b"vllm-watermark:synthid-subkeys:v1")
+        synthid_keys = key.derive_subkeys(depth, SYNTHID_KEY_LABEL)
         synthid_cfg = SynthIDConfig(vocab_size=vocab_size, keys=synthid_keys, ngram_len=args.synthid_ngram_len)
 
         def synthid_scorer(token_ids, _cfg=synthid_cfg):
@@ -388,31 +412,44 @@ def main(argv: "list[str] | None" = None) -> int:
     else:
         results["synthid"] = None
 
-    # unwatermarked/human FPR: scored against whichever detector(s) are
-    # available -- prefer KGW when both --kgw-corpus and a real KGW config
-    # exist (KGW is always constructible; SynthID requires the module),
-    # matching this script's single-pass-per-invocation design (see
-    # render_report's "Notes" section on rerunning per scheme).
-    fpr_scorer = kgw_scorer
+    # unwatermarked/human FPR: scored with EVERY available detector, one
+    # self-describing row per (corpus, detector) pair. A single pooled row
+    # scored by one detector cannot support a per-scheme FPR claim (audit
+    # finding, 2026-08-08) -- each scheme's FPR needs its own detector run.
+    fpr_scorers = [("kgw det", kgw_scorer)]
+    if synthid_scorer is not None:
+        fpr_scorers.append(("synthid det", synthid_scorer))
 
     if args.unwatermarked_corpus:
-        print(f"Scoring unwatermarked corpus <- {args.unwatermarked_corpus} (FPR, KGW detector)")
-        results["unwatermarked"] = score_corpus_at_lengths(args.unwatermarked_corpus, tokenizer, fpr_scorer, TRUNCATION_LENGTHS)
+        for det_name, scorer in fpr_scorers:
+            print(f"Scoring unwatermarked corpus <- {args.unwatermarked_corpus} (FPR, {det_name})")
+            results[f"unwatermarked ({det_name})"] = score_corpus_at_lengths(
+                args.unwatermarked_corpus, tokenizer, scorer, TRUNCATION_LENGTHS)
+        if synthid_scorer is None:
+            # Explicit, not silent: corpus supplied but synthid detector
+            # unavailable -> render a visible not-present row (audit fix).
+            results["unwatermarked (synthid det)"] = None
     else:
-        results["unwatermarked"] = None
+        results["unwatermarked (kgw det)"] = None
+        results["unwatermarked (synthid det)"] = None
 
     if args.human_corpus:
-        print(f"Scoring human corpus <- {args.human_corpus} (FPR, KGW detector)")
-        results["human"] = score_corpus_at_lengths(args.human_corpus, tokenizer, fpr_scorer, TRUNCATION_LENGTHS)
+        for det_name, scorer in fpr_scorers:
+            print(f"Scoring human corpus <- {args.human_corpus} (FPR, {det_name})")
+            results[f"human ({det_name})"] = score_corpus_at_lengths(
+                args.human_corpus, tokenizer, scorer, TRUNCATION_LENGTHS)
+        if synthid_scorer is None:
+            results["human (synthid det)"] = None
     else:
-        results["human"] = None
+        results["human (kgw det)"] = None
+        results["human (synthid det)"] = None
 
     config_summary = {
         "model_tokenizer": args.model_tokenizer,
         "vocab_size": vocab_size,
         "key_id": key.key_id,
         "gamma": args.gamma,
-        "synthid_depth": args.synthid_depth or "DEFAULT_SYNTHID_DEPTH",
+        "synthid_depth": (synthid_cfg.keys and len(synthid_cfg.keys)) if synthid_scorer is not None else "unavailable",
         "synthid_ngram_len": args.synthid_ngram_len,
         "truncation_lengths": list(TRUNCATION_LENGTHS),
     }

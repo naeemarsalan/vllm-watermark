@@ -49,7 +49,11 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from conftest import BatchUpdate, MoveDirectionality  # noqa: E402
+# Import via the canonical path: tests/conftest.py has already installed
+# the v0.18.0-accurate stub into sys.modules (or real vllm exists) by the
+# time pytest imports this module, so this works under any import mode and
+# combined-suite collection (from-conftest module imports do not).
+from vllm.v1.sample.logits_processor import BatchUpdate, MoveDirectionality  # noqa: E402
 
 # Import order matters: conftest.py's stub (if any) must already be
 # installed before this import -- guaranteed by pytest always collecting

@@ -48,3 +48,13 @@ synthid = "vllm_watermark.synthid.processor:SynthIDLogitsProcessor"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# --import-mode=importlib: tests/ and detector/tests/ both contain a
+# conftest.py (and same-named test modules are possible later); the default
+# "prepend" import mode maps both onto colliding top-level module names when
+# the two suites are collected in ONE invocation, failing collection
+# (reproduced 2026-08-08; see EXPERIMENTS.md raw-evidence addendum).
+# importlib mode gives each file a unique module identity instead.
+addopts = "--import-mode=importlib"
+testpaths = ["tests", "detector/tests"]

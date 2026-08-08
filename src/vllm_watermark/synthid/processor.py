@@ -110,38 +110,40 @@ transformers' own int64-hash ring buffer, which this package deliberately
 does not replicate anywhere). Using the identical idiom in both places
 means "was this context already seen" means exactly the same thing whether
 asked at generation time (here) or at detection time (`detector.py`),
-which matters because a real detector will eventually need to reconstruct
-comparable masking during offline scoring of vLLM-generated text (Phase 3,
-not built as of this task).
+which matters because the detection side reconstructs comparable masking
+during offline scoring of vLLM-generated text — implemented in
+`vllm_watermark.synthid.detector` and served by `detector/app.py`
+(Phase 3, built and validated end-to-end on-cluster 2026-08-08; see
+EXPERIMENTS.md).
 
-DESIGN DECISION 4 -- CPU/GPU device transfer (a real correctness fix, not
-just documentation)
+DESIGN DECISION 4 -- device-native hot path (REVISED 2026-08-08; the
+original CPU-transfer design below it replaced is preserved in git history)
 ---------------------------------------------------------------------------
-`vllm_watermark.synthid.core.g_values()` (and the `_sampling_table()` /
-`_keys_tensor()` / `_accumulate_hash()` helpers it calls) build every
-tensor WITHOUT a `device=` argument -- i.e. always CPU, by the same
-"device-independent by construction" design `kgw/core.py` uses (see
-`synthid/core.py` module docstring "Device independence"). KGW's
-`apply()` copes with this by moving only a small green-list INDEX tensor
-to `logits.device` (`ids.to(device=logits.device, ...)`) while `logits`
-itself never moves. SynthID's `process_scores_row()` cannot use that
-trick: internally it does `g_i * probs` where `probs = softmax(scores_row)`
-lives on WHATEVER device `scores_row` was passed on and `g_i` (derived
-from `g_values()`) is always CPU -- multiplying tensors on different
-devices raises a `RuntimeError` in torch. So, UNLIKE KGW, this processor
-moves the affected logits ROW to CPU before calling `process_scores_row()`
-and moves the (small, `(vocab_size,)`-shaped) result back to
-`logits.device` afterward -- see `apply()`. `Tensor.to(device)` is a no-op
-(returns the same object, no copy) when the tensor is already on that
-device, so this costs nothing extra on a CPU-only deployment (e.g. these
-static tests) and is exercised there, but it IS a real per-active-row,
-per-decode-step host<->device transfer of a full `(vocab_size,)` tensor on
-a real GPU deployment -- a materially different (and likely more
-expensive) cost profile than KGW's sparse index-only transfer. This has
-NOT been measured (no GPU available on this workstation -- see AGENTS.md
-environment facts); flagged for Phase 2 benchmarking
-(`docs/implementation.md` Phase 2 accept criteria already calls for a
-KGW-vs-SynthID overhead comparison table).
+`vllm_watermark.synthid.core.g_values()` computes on the DEVICE OF ITS
+`candidate_token_ids` ARGUMENT, and `process_scores_row()` places its
+candidates tensor on `scores_row.device` -- so when `apply()` below passes
+a CUDA logits row, the entire per-step computation (integer LCG hashing,
+sampling-table lookup, tournament reweighting) runs on the GPU with NO
+host<->device row transfer. Device independence of the DETECTABLE signal
+is preserved by construction: the sampling table and keys tensor are
+always BUILT on CPU and only MOVED (bit-exact for int64), and everything
+else in the g-value path is exact int64 arithmetic with identical
+semantics on CPU and CUDA. The float reweighting math may differ in
+last-ulp rounding across devices, but detection depends only on the
+SAMPLED TOKENS plus integer g-values, never on float reproducibility.
+
+MEASURED (EXECUTED 2026-08-08, in the serving pod on the A10G -- see
+EXPERIMENTS.md "Phase 2" and the raw-evidence addendum):
+  * g_values GPU vs CPU: 0 mismatching trials / 20 (full vocab 151936,
+    depth 30) -- the load-bearing device-independence claim, verified
+    empirically on real CUDA hardware, not just argued.
+  * process_scores_row: 2.57 ms/call on the A10G vs 290.98 ms/call on CPU
+    (~113x) -- the device-native path is what makes SynthID servable; the
+    CPU cost is architectural (depth sequential reductions over the full
+    vocab).
+`apply()` accordingly computes in float32 on `logits.device` and casts the
+result back to `logits.dtype`; on a CPU-only deployment every `.to()` is a
+no-op and the static tests exercise the identical code path.
 
 DESIGN DECISION 5 -- per-tournament-layer key derivation label
 ---------------------------------------------------------------------------
@@ -150,8 +152,8 @@ tournament-layer keys from one configured secret, namespaced by an
 arbitrary `label` (see that method's docstring -- "different subkey
 purposes drawn from the same secret ... never collide"). This module fixes
 `_SYNTHID_KEY_LABEL` below as ITS label. CROSS-TASK COORDINATION NOTE: any
-future detection-side caller (a Phase 3 detection service, not built as of
-this task -- see `docs/implementation.md` Phase 3) that reconstructs a
+detection-side caller (the shipped one is `detector/app.py`, which reads the
+canonical constants from `vllm_watermark.synthid.core`) that reconstructs a
 `SynthIDConfig` from a `WatermarkKey` to verify text this processor
 generated MUST call `derive_subkeys()` with the IDENTICAL `(depth, label)`
 -- i.e. `depth = VLLM_WATERMARK_SYNTHID_KEY_DEPTH` (default

@@ -1,13 +1,15 @@
 # SynthID-scheme twin of detector-deploy.yaml (same image, same code).
 #
-# WHY THIS FILE EXISTS (EXECUTED evidence, 2026-08-08): the RHOAI-3.4-matched
-# orchestrator image (quay.io/opendatahub/ta-guardrails-orchestrator:odh-3.4.2.git)
-# self-reports fms-guardrails-orchestr8 0.16.0 on /health:8034 and SILENTLY
+# WHY THIS FILE EXISTS (EXECUTED evidence, 2026-08-08): the deployed
+# orchestrator image (quay.io/trustyai/ta-guardrails-orchestrator@sha256:f3952b13…,
+# the digest pinned in orchestrator.yaml) self-reports
+# fms-guardrails-orchestr8 0.16.0 on /health:8034 and SILENTLY
 # IGNORES the 0.18.3+ `path_prefix` detector-config field (rollout succeeds,
-# routing unchanged). With one shared detector Service, per-request scheme
-# selection then depends entirely on the CLIENT passing detector_params.scheme
-# -- a misconfiguration trap (a caller forgetting the param gets the env
-# default scheme silently). This second Deployment pins
+# routing unchanged). A SINGLE SHARED detector Service WOULD make
+# per-request scheme selection depend entirely on the client passing
+# detector_params.scheme -- a misconfiguration trap (a caller forgetting the
+# param would silently get the env default scheme). The deployed design
+# avoids that trap: this second Deployment pins
 # WATERMARK_DETECTOR_SCHEME=synthid at the SERVER side; the orchestrator
 # registers watermark-synthid -> hostname detector-synthid. detector_params
 # overrides still work on both deployments.
@@ -68,12 +70,14 @@ metadata:
     app.kubernetes.io/part-of: vllm-watermark
     app.kubernetes.io/component: detector-synthid
   annotations:
-    # See header comment. `detector` here is the ImageStreamTag created by
-    # detector-build.yaml's `output.to` (kind: ImageStreamTag, name:
-    # detector:latest); `container.name == "detector"` below is what
-    # `fieldPath` walks to.
+    # See header comment. `detector:latest` is the shared ImageStreamTag
+    # created by detector-build.yaml's `output.to` (both scheme Deployments
+    # run the SAME image); `container.name == "detector-synthid"` below is
+    # what `fieldPath` walks to — it MUST match this Deployment's container
+    # name (a mismatched name silently never resolves the image; found and
+    # fixed by audit 2026-08-08).
     image.openshift.io/triggers: >-
-      [{"from":{"kind":"ImageStreamTag","name":"detector:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"detector\")].image","paused":false}]
+      [{"from":{"kind":"ImageStreamTag","name":"detector:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"detector-synthid\")].image","paused":false}]
 spec:
   replicas: 1
   selector:
@@ -141,14 +145,41 @@ spec:
             - name: WATERMARK_VOCAB_SIZE
               value: "151936"
             # Default scheme for the generic `/api/v1/text/contents` route
-            # and for `/v1/watermark/detect` when no `scheme` is given. Also
-            # doubles as the practical default for the orchestrator's
-            # `watermark-kgw` DetectorConfig entry -- see orchestrator.yaml
-            # "Scheme wiring" for why `watermark-synthid` callers MUST pass
-            # `detector_params.scheme: synthid` explicitly rather than
-            # relying on this default.
+            # and for `/v1/watermark/detect` when no `scheme` is given. Scheme
+            # authority is server-side: the orchestrator's `watermark-kgw`
+            # entry routes to THIS Deployment and `watermark-synthid` to the
+            # dedicated detector-synthid Deployment (its copy of this env is
+            # `synthid`), so callers need no scheme params;
+            # `detector_params.scheme` stays available as an override.
             - name: WATERMARK_DETECTOR_SCHEME
               value: "synthid"
+            # JWS result signing — an engineering/auditability choice: a
+            # verifier can prove a verdict came from this detector and was
+            # not altered. (Whether any legal measure REQUIRES signed
+            # detection results is an OPEN question pending an exact quote
+            # in docs/quotes.md — see docs/implementation.md; do not cite
+            # this feature as a compliance requirement.)
+            # Key: Secret detector-signing-key,
+            # created per deploy/phase3/README.md §"Signing key" — REQUIRED
+            # by this manifest; app.py fails loudly at startup if the path
+            # is set but unreadable (deliberate: a misconfigured signing key
+            # is a deployment bug, an absent SIGNING_KEY_PATH env would be
+            # silent-unsigned dev mode).
+            - name: SIGNING_KEY_PATH
+              value: /etc/signing/signing.pem
+            # Sourced from the SAME Secret as the key material so the id and
+            # the key rotate together and cannot drift. REQUIRED (no
+            # `optional:`): this manifest makes signing mandatory and
+            # detector/app.py has NO default kid — an absent SIGNING_KEY_ID
+            # would silently emit JWS tokens without a `kid` header, which
+            # defeats key-rotation verification. The runbook's
+            # `oc create secret ... --from-literal=SIGNING_KEY_ID=...`
+            # creates this key alongside the PEM.
+            - name: SIGNING_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: detector-signing-key
+                  key: SIGNING_KEY_ID
           resources:
             # Exactly the sizing given in the task brief (tokenizer + torch
             # CPU, no model weights loaded): cpu 1 / mem 2Gi request, 4Gi
@@ -167,19 +198,20 @@ spec:
           volumeMounts:
             - name: hf-cache
               mountPath: /tmp/hf
+            - name: signing-key
+              mountPath: /etc/signing
+              readOnly: true
           # /ready (per task brief) -- detector/app.py: 503 until BOTH the
           # tokenizer has loaded (`AutoTokenizer.from_pretrained`, needs
           # network egress to huggingface.co on every pod start, since
           # `hf-cache` is an emptyDir and does not persist across restarts)
           # AND at least one watermark key is configured; 200 with
-          # `key_ids` once both are true. Timing NOT measured by this task
-          # (no pod was started) -- initialDelaySeconds/failureThreshold
-          # below are a conservative starting guess (tokenizer-only
-          # download, no model weights, so this should be materially
-          # faster than deploy/phase0's vLLM pods' 60s+ model-load delay);
-          # tighten or loosen after the first real deploy and record actual
-          # observed time-to-Ready in EXPERIMENTS.md per this repo's
-          # verification discipline.
+          # `key_ids` once both are true. MEASURED (2026-08-08, recorded
+          # deploys): Deployments reached Available within one 15-second
+          # poll interval after `oc apply` in repeated rollouts (image
+          # already in the internal registry; tokenizer-only download) —
+          # the probe settings below are comfortably conservative against
+          # that observation.
           readinessProbe:
             httpGet:
               path: /ready
@@ -212,3 +244,6 @@ spec:
         - name: hf-cache
           emptyDir:
             sizeLimit: 512Mi
+        - name: signing-key
+          secret:
+            secretName: detector-signing-key

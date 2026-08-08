@@ -1,0 +1,644 @@
+# deploy/phase3/nemo-guardrails-poc.yaml
+#
+# STATUS: VALIDATED (EXECUTED) -- UPSTREAM NeMo Guardrails PyPI LIBRARY
+# ONLY, live cluster, `watermark` namespace, ocp-ai. Proves that a custom
+# NeMo Guardrails output-rail action CAN call our detector service
+# (POST http://detector:8000/v1/watermark/detect), correctly
+# block/allow based on its verdict, fail closed (block, not silently
+# allow) on detector unreachability, missing key/scheme configuration, or
+# a MALFORMED-SUCCESS response (a 200 whose body is not valid JSON, not an
+# object, missing "verdict", or has a non-boolean "verdict"), and NEVER
+# log a detector-supplied value verbatim -- only a fixed, explicitly
+# validated set of fields is ever logged, closing a log-tunneling defect
+# where a malfunctioning or compromised detector could otherwise write
+# arbitrary attacker-controlled strings into the NeMo Guardrails process
+# log via a well-formed-looking 200 response. Validated through the
+# library's Python API (`LLMRails.check_async`) and its HTTP server
+# (`nemoguardrails server` + `POST /v1/checks`). This closes
+# docs/api-notes-nemo-guardrails.md's path (b)/(c) as EXECUTED where that
+# doc had only gone as far as STATIC source review.
+#
+# A full raw, content-redacted evidence transcript (exact commands + exact
+# outputs for every result summarized below, captured in one coherent
+# fresh-pod validation pass) is the source record for this file's claims
+# and is intended for ingestion into this repo's central experiment log
+# per AGENTS.md's verification discipline ("Works" means EXECUTED, command
+# + raw output recorded) -- this manifest header is a summary derived from
+# that transcript, not a substitute for it.
+#
+# Scope: this validation ran entirely as a plain, unmanaged Kubernetes Pod
+# running `pip install nemoguardrails` -- no RHOAI, no operator, and no
+# `NemoGuardrails` CRD was installed on this cluster; no RHOAI-managed
+# (Phase 4) work is included. This file therefore does not close, and
+# should not be cited as closing, docs/api-notes-nemo-guardrails.md sec
+# 5.2's open item (whether RHOAI 3.4's `NemoGuardrails` operator itself
+# mounts and auto-registers an admin-authored `actions.py` end-to-end) or
+# the RHOAI-managed-CR portion of docs/facts.md D5 -- those remain open.
+# What this file DOES show, as a plain-Kubernetes analog: a ConfigMap
+# containing `config.yml`/`actions.py`/`flows.co` mounted at
+# `/app/config/$Name` (the same path convention the CR schema documents)
+# is readable and auto-registers correctly when the upstream library
+# loads it via `RailsConfig.from_path()` -- suggestive, not proof, for the
+# operator-managed path. See "Open issues" below for the precise
+# statement of what remains untested.
+#
+# ---------------------------------------------------------------------
+# What was run (repo: /home/anaeem/vllm-watermark; KUBECONFIG=cluster/auth/kubeconfig)
+# ---------------------------------------------------------------------
+# Namespace: watermark (pre-existing). Created and later deleted a single
+# scratch Pod `nemo-test` (python:3.12-slim, no GPU, cpu 500m/mem 1Gi
+# requests, enableServiceLinks: false) that mounted this ConfigMap at
+# /app/config/watermark-poc, alongside the pre-existing `detector`
+# Service (svc/detector:8000, already deployed by an earlier phase-3
+# validation -- see detector-deploy.yaml in this directory). Nothing else
+# in the namespace was touched; the GPU MachineSet was never scaled.
+#
+# ---------------------------------------------------------------------
+# Reproducible install — scope: VERSION-RESOLVED PYTHON DEPENDENCIES under
+# the recorded image/platform (python:3.12-slim tag as pulled 2026-08-08,
+# CPython 3.12, linux/amd64), fully pinned via the constraints file and
+# re-verified zero-drift in a genuinely fresh Pod. NOT a bit-reproducible
+# base-image/supply-chain claim: the tag is mutable and no artifact hashes
+# are pinned. The temporary test pod ran with PodSecurity "restricted"
+# warnings (no securityContext hardening) — a recorded limitation of the
+# deleted single-purpose test pod, not a production posture; any reusable
+# deployment must add a restricted-profile securityContext and pin the
+# base image by digest.
+# ---------------------------------------------------------------------
+# `deploy/phase3/nemo-poc-constraints.txt` (checked in alongside this
+# file) is the complete `pip freeze` output captured from an unconstrained
+# `pip install 'nemoguardrails[server]==0.23.0' httpx` -- 78 packages, one
+# `pkg==ver` per line. The recorded, reproducible install command is:
+#
+#   pip install -c nemo-poc-constraints.txt 'nemoguardrails[server]==0.23.0' httpx
+#
+# This exact command was re-run again in this pass, in a freshly created
+# `nemo-test` Pod, and the resulting `pip freeze` was diffed byte-for-byte
+# against `nemo-poc-constraints.txt`: zero differences across all 78
+# packages, including every transitive dependency (fastapi, starlette,
+# uvicorn, pydantic, aiohttp, etc.).
+#
+# Key entries from the constraints file, for quick reference (see the
+# full file for the complete pinned set):
+#   nemoguardrails==0.23.0
+#   httpx==0.28.1
+#   fastapi==0.141.1
+#   starlette==1.4.1
+#   uvicorn==0.52.1
+#   pydantic==2.13.4
+#   pydantic_core==2.46.4
+#   aiohttp==3.14.3
+#
+# Test texts (read locally, oc cp'd into the pod, never printed):
+#   - benchmarks/data/corpus_kgw512_fixed.jsonl, record[0] -- KGW-watermarked,
+#     key_id "poc-2026-08", 512 completion_tokens, 2348 chars.
+#   - benchmarks/data/human_corpus.jsonl, record[0] -- Project Gutenberg
+#     ("Pride and Prejudice") human text, 256 tokens, 1097 chars.
+#
+# ---------------------------------------------------------------------
+# Failure policy (env WATERMARK_RAIL_FAILURE_POLICY, "closed" | "open")
+# ---------------------------------------------------------------------
+# An earlier revision of `actions.py` returned False (ALLOW) whenever the
+# detector was unreachable, timed out, or returned a non-200 status -- a
+# silent bypass during outage or misconfiguration, unacceptable for a
+# compliance rail. The current revision adds an explicit, env-controlled
+# policy:
+#   - "closed" (DEFAULT): any detector-call failure, malformed-success
+#     response (see below), or missing
+#     VLLM_WATERMARK_KEY_ID/VLLM_WATERMARK_SCHEME/bot_message
+#     configuration, BLOCKS the response and logs the failure reason +
+#     policy actually applied.
+#   - "open": the same failures ALLOW the response through unchecked, but
+#     ONLY after logging loudly, at module-load time, that this is a
+#     deliberate availability-over-compliance choice -- never silent.
+# An unrecognized value for WATERMARK_RAIL_FAILURE_POLICY itself falls
+# back to "closed" with a logged warning.
+#
+# ---------------------------------------------------------------------
+# No hardcoded key material or scheme
+# ---------------------------------------------------------------------
+# `actions.py` previously fell back to a hardcoded default
+# (VLLM_WATERMARK_KEY_ID = "poc-2026-08" if unset), which is unsafe as
+# reusable code. The current revision removes BOTH the key_id and the
+# scheme hardcoded fallbacks. Both are now read from the environment with
+# no default; if either is absent, `actions.py` logs a loud warning at
+# module-load time AND fails every check through the failure-policy path
+# above (blocked + logged, under the default "closed" policy).
+#
+# Real-deployment env-sourcing sketch (this Pod sets VLLM_WATERMARK_KEY_ID
+# as a literal value for test repeatability only -- see
+# detector-deploy.yaml in this same directory for the pattern a real
+# deployment should follow, which this sketch mirrors exactly):
+#
+#   env:
+#     - name: VLLM_WATERMARK_KEY_ID
+#       valueFrom:
+#         secretKeyRef:
+#           name: watermark-key
+#           key: WATERMARK_KEY_ID
+#     - name: VLLM_WATERMARK_SCHEME
+#       value: "kgw"
+#     - name: WATERMARK_RAIL_FAILURE_POLICY
+#       value: "closed"
+#
+# ---------------------------------------------------------------------
+# Malformed-success handling
+# ---------------------------------------------------------------------
+# An earlier revision trusted any HTTP 200 unconditionally:
+# `bool(result.get("verdict"))` treats a MISSING "verdict" key as
+# `bool(None) == False` -- i.e. it fails OPEN on a malformed-but-200
+# response, and an unhandled `resp.json()` parse error would have
+# propagated as an ambiguous, uncaught exception. The current revision
+# validates the response schema explicitly: the body must parse as JSON,
+# must be a JSON object, must contain a "verdict" key, and that key's
+# value must be a genuine Python `bool` (a string like "true", an int like
+# 1, or `null` are all REJECTED -- `isinstance(x, bool)` is used, not
+# `bool(x)`, so truthy/falsy coercion of a non-bool value never happens).
+# ANY violation of this is routed through the SAME `_apply_failure_policy()`
+# path as a transport error -- fails closed by default, logged with the
+# SPECIFIC schema violation (e.g. "detector response missing 'verdict'
+# field", or "detector response 'verdict' field is not boolean: type=str")
+# -- never the detector-supplied VALUE itself, only its shape/type.
+#
+# bot_message handling (explicit, both branches tested):
+#   - `context` is not a dict, or lacks a "bot_message" key entirely (or
+#     is itself `None`): treated as an INTEGRATION FAILURE -- something
+#     upstream is wired wrong -- and routed through the failure policy
+#     (blocked + logged, under the default "closed" policy).
+#   - "bot_message" present but empty string or `None`: treated as
+#     HARMLESS -- there is no text a watermark could have been missed on
+#     -- allowed, with a debug-level (not warning-level) log line.
+#
+# ---------------------------------------------------------------------
+# Logging / anti-tunneling (this revision's fix)
+# ---------------------------------------------------------------------
+# A prior revision's success-path log line was:
+#   log.info("... verdict=%s z_score=%s p_value=%s scheme=%s key_id=%s",
+#             verdict, result.get("z_score"), result.get("p_value"),
+#             result.get("scheme"), result.get("key_id"))
+# This validated ONLY `verdict` before logging -- `z_score`, `p_value`,
+# `scheme`, and `key_id` were all logged as whatever the detector's JSON
+# response happened to contain, UNVALIDATED. A malfunctioning or
+# compromised detector could return `{"verdict": true, "z_score": "<any
+# attacker-chosen string>", ...}` and have that string written straight
+# into the NeMo Guardrails process log -- a log-tunneling channel that
+# contradicted this manifest's own "type names only" logging claim from
+# the malformed-success-handling revision above (that claim covered the
+# failure path via `_apply_failure_policy`, but NOT the success-path log
+# line, which is the gap this revision closes).
+#
+# Fixed: the success-path log line now logs ONLY:
+#   (a) `scheme` and `key_id` as the REQUEST-LOCAL values this action
+#       itself read from its own environment and sent to the detector --
+#       NEVER `result.get("scheme")` / `result.get("key_id")`, which are
+#       detector-supplied and therefore untrusted, regardless of whether
+#       they happen to match what was sent.
+#   (b) `verdict`, already validated as a genuine bool before this log
+#       line is ever reached.
+#   (c) `z_score` / `p_value`, EACH independently passed through
+#       `_safe_numeric()`: logged as the value itself ONLY if it is a
+#       genuine, finite `int`/`float` (bool explicitly excluded, since
+#       `bool` is a Python `int` subclass); otherwise a content-free
+#       `<invalid:TYPE>` marker (e.g. `<invalid:str>`) is logged in its
+#       place -- the detector-supplied value is NEVER echoed.
+# No other field from the detector's response (an unexpected "extra" key,
+# or anything else) is ever referenced by this log line, regardless of
+# its name or value.
+#
+# Adversarial test (EXECUTED, in-pod mock -- the real detector Deployments
+# were never touched): a mock detector returned HTTP 200 with
+# `{"verdict": true, "z_score": "MARKER_A_...", "p_value": "MARKER_D_...",
+# "scheme": "MARKER_B_...", "key_id": "MARKER_E_...", "extra":
+# "MARKER_C_..."}` -- five distinct marker strings covering every
+# detector-supplied field this action ever reads, including two
+# (`scheme`, `key_id`) that were the actual defect and one (`extra`) that
+# exercises "no other field is ever logged". After running the rail
+# against this mock, the ENTIRE captured process output (not just this
+# action's own log line -- stdout/stderr of the whole `check_async` call,
+# so this also covers any NeMo-internal echoing) was searched for each of
+# the 5 marker strings: all 5 counts were 0. The single log line the
+# action did emit was captured and confirmed to be the sanitized,
+# request-local form (see "Results" below for the exact line).
+#
+# ---------------------------------------------------------------------
+# Results (content-redacted; RAW evidence EXECUTED 2026-08-08, this
+# revision of actions.py; full command-level transcript is the evidence
+# record referenced above)
+# ---------------------------------------------------------------------
+# (0) Direct detector call (POST /v1/watermark/detect, scheme=kgw,
+#     key_id=poc-2026-08) -- ground truth the rail is checked against,
+#     unchanged from earlier validation passes:
+#       kgw sample:   verdict=true,  z_score=12.817, p_value=6.57e-38, num_tokens_scored=400
+#       human sample: verdict=false, z_score=0.713,  p_value=0.238,   num_tokens_scored=237
+#
+# (a) Malformed-success test 1 (in-pod mock, real Deployments untouched):
+#     HTTP 200, well-formed JSON object with NO "verdict" key at all, via
+#     `LLMRails.check_async` against a synthetic, non-corpus dummy message:
+#       result: status=RailStatus.BLOCKED, rail="watermark check"
+#       Logged: WARNING:actions.py:watermark_check: FAILING CLOSED
+#       (blocking response) reason=detector response missing 'verdict'
+#       field policy=closed
+#
+# (b) Malformed-success test 2 (same mock pattern): HTTP 200 with
+#     `{"verdict": "true"}` (a STRING, not a boolean):
+#       result: status=RailStatus.BLOCKED, rail="watermark check"
+#       Logged: WARNING:actions.py:watermark_check: FAILING CLOSED
+#       (blocking response) reason=detector response 'verdict' field is
+#       not boolean: type=str policy=closed
+#
+# (c) Adversarial anti-tunneling test (this revision, described above):
+#     marker counts across the ENTIRE captured process output --
+#       MARKER_A_ZSCORE=0, MARKER_B_SCHEME=0, MARKER_C_EXTRA=0,
+#       MARKER_D_PVALUE=0, MARKER_E_KEYID=0
+#     The single sanitized log line the action emitted:
+#       INFO:actions.py:watermark_check verdict=True z_score=<invalid:str>
+#       p_value=<invalid:str> scheme=kgw key_id=poc-2026-08
+#     (scheme/key_id are the request-local "kgw"/"poc-2026-08" values,
+#     NOT the mock's "MARKER_B_.../MARKER_E_..." echoes; z_score/p_value
+#     are `<invalid:str>` markers, not the mock's marker strings.)
+#     Rail decision: status=RailStatus.BLOCKED, rail="watermark check"
+#     (verdict=true from the mock correctly still blocks -- validating
+#     the verdict boolean and sanitizing the OTHER fields are independent
+#     concerns).
+#
+# (d) bot_message unit-level tests (direct calls to the `watermark_check`
+#     action):
+#       context missing "bot_message" key entirely -> BLOCKED
+#         (reason="bot_message missing from context (integration failure)")
+#       context={"bot_message": ""}                -> ALLOWED (debug log only)
+#
+# (e) Real-detector happy-path regression: real detector reachable,
+#     `POST /v1/checks`, VLLM_WATERMARK_KEY_ID and VLLM_WATERMARK_SCHEME
+#     supplied via env:
+#       kgw sample:   http_status=200, {"status": "blocked", "rail": "watermark check"}
+#       human sample: http_status=200, {"status": "passed",  "rail": null}
+#
+# (f) Fail-closed / no-hardcoded-key tests from an earlier hardening pass
+#     (dead detector URL -> both samples BLOCKED; VLLM_WATERMARK_KEY_ID
+#     unset -> both samples BLOCKED with a loud log; policy=open + dead
+#     detector -> both samples ALLOWED with a loud deliberate-choice log;
+#     context=None and bot_message=None cases) exercise code paths
+#     unchanged by this revision (`_apply_failure_policy`, the env-sourced
+#     key_id/scheme checks, the context/bot_message-missing branch) and
+#     were not all individually re-run in this pass's transcript -- see
+#     git history / prior versions of this file for that evidence.
+#
+# All results match the design. GOAL met: the NeMo-forward path calls our
+# detector, blocks exactly the watermarked text under normal operation,
+# fails closed on detector outage, missing configuration, or a
+# malformed-but-200 response, and never lets a detector-supplied value
+# tunnel into the process log.
+#
+# ---------------------------------------------------------------------
+# Design decisions (deltas from the STATIC sketch in
+# docs/api-notes-nemo-guardrails.md, forced by the ACTUAL installed
+# nemoguardrails==0.23.0, not the develop-HEAD sources that doc was
+# written against)
+# ---------------------------------------------------------------------
+# - `nemoguardrails.actions.rail_outcome.RailOutcome` and the
+#   `nemoguardrails.http` module (both cited in api-notes sec 1.1/1.2) do
+#   NOT exist in 0.23.0 -- confirmed absent by listing the installed
+#   package. The action below returns a plain `bool`, matching the
+#   installed library's OWN `jailbreak_detection_heuristics` action, and
+#   calls the detector with plain `httpx`.
+# - `check_async` (and therefore `POST /v1/checks`) hard-rejects any
+#   config with `colang_version` other than "1.0". `flows.co` below is
+#   therefore written in the Colang 1.0 dialect (`define flow` /
+#   `execute` / `bot` / `stop`), copied in structure from the installed
+#   library's own
+#   nemoguardrails/library/self_check/output_check/flows.v1.co.
+# - `POST /v1/checks` requires a top-level `model` field even though
+#   output-rail-only checks never invoke a model -- a placeholder string
+#   satisfies it. `LLMRails(...)` still requires a `models:` block to
+#   construct at all, but that placeholder model is NEVER actually called
+#   over the network for an output-rail-only check.
+# - Fail-closed default, no-hardcoded-key-or-scheme, malformed-success/
+#   bot_message handling, and success-path log sanitization (this and
+#   prior revisions): detailed above. The general principle threading all
+#   of these together: the detector's response is untrusted input in
+#   every dimension this action reads it -- its HTTP status, its JSON
+#   validity, its "verdict" field's type, AND every other field's value
+#   when logging -- and any deviation from the expected shape fails
+#   through the SAME configured policy, never a silent, ad hoc fallback.
+#
+# ---------------------------------------------------------------------
+# Open issues (genuinely unresolved by this validation -- not to be read
+# as validated)
+# ---------------------------------------------------------------------
+# - Content-retention gap vs. this repo's own detector: `POST /v1/checks`
+#   422 validation errors echo the FULL submitted request body -- including
+#   message content -- back in the HTTP response by default (standard
+#   FastAPI/pydantic behavior, confirmed by execution). Separately, the
+#   `nemoguardrails server` process's own internal event/processing log
+#   recorded full message content by default, with no `--verbose` flag
+#   set. This library does NOT share detector/app.py's zero-retention
+#   design. Adopting this path for real would need (a) a reverse proxy or
+#   client wrapper that always sends well-formed requests and/or scrubs
+#   error bodies, and (b) suppressing or redacting the server's internal
+#   event logging. Not designed or built here -- flagged OPEN.
+#   Incident record: during an earlier validation pass, a debugging step
+#   (an unguarded print of a `/v1/checks` error-body response, and a raw
+#   inspection of the server's internal log file) briefly echoed
+#   non-sensitive benchmark text -- a Project Gutenberg public-domain
+#   excerpt and this project's own KGW sample, no keys/secrets/personal
+#   data -- into command output before being caught and corrected. The
+#   pod holding that log file was deleted at cleanup; nothing persisted
+#   on-cluster or in this repo. All subsequent validation runs use
+#   response handling that extracts only known-safe scalar fields or
+#   content-free failure/marker-count data, specifically to prevent
+#   recurrence -- this revision extends that same discipline to the
+#   action's own success-path logging (the subject of this pass).
+# - `GuardrailCheckResponse` (the `/v1/checks` response model in 0.23.0)
+#   exposes only `status` / `content` / `rail` -- no generic metadata
+#   passthrough. Our detector's `z_score`/`p_value`/`key_id` therefore do
+#   NOT reach a `/v1/checks` caller; a real deployment wanting that
+#   evidence in the compliance record would need the action to log/emit
+#   it itself (as `actions.py` below already does via `log.info(...)`,
+#   sanitized as described above) rather than relying on NeMo Guardrails
+#   to relay it.
+# - This validation ran a vanilla `pip install nemoguardrails==0.23.0` in
+#   a plain Pod, NOT through RHOAI 3.4's actual `NemoGuardrails`
+#   operator/CR (not installed on this cluster) and NOT necessarily the
+#   same version RHOAI 3.4 ships. Whether RHOAI 3.4's shipped image pins
+#   this same 0.23.0 is UNVERIFIED -- flagged OPEN.
+# - The ConfigMap-mount proof here used a plain Pod, not the actual
+#   `NemoGuardrails` CRD/operator (would require installing that
+#   operator, outside the cluster scope defined for this validation:
+#   ConfigMap `nemo-watermark-config` + Pod `nemo-test` only). The
+#   mount-path convention (`/app/config/$Name`) and file-based
+#   auto-registration are confirmed working; the operator's own
+#   reconciliation of that CR is not.
+# - The adversarial anti-tunneling test covers 5 detector-supplied fields
+#   (z_score, p_value, scheme, key_id, and one unexpected "extra" field)
+#   via marker-string substitution and a single mock scenario
+#   (verdict=true + all fields poisoned simultaneously). It does not
+#   exhaustively test every combination (e.g. verdict=false + poisoned
+#   fields, or deeply nested/non-string marker placements), though the
+#   underlying fix (`_safe_numeric()` for numeric fields, request-local
+#   values for scheme/key_id, no reference to any other field at all) is
+#   structural rather than case-by-case, so additional combinations are
+#   expected to behave the same way by construction, not by further
+#   testing performed in this pass.
+#
+# ---------------------------------------------------------------------
+apiVersion: v1
+data:
+  actions.py: |
+    # SPDX-License-Identifier: Apache-2.0
+    """NeMo Guardrails custom output-rail action wrapping the vllm-watermark
+    detector's direct POST /v1/watermark/detect endpoint. Return-type idiom
+    (plain bool) matches the installed nemoguardrails==0.23.0 library's own
+    nemoguardrails/library/jailbreak_detection/actions.py
+    (jailbreak_detection_heuristics -> bool) -- see the manifest header for
+    version/behavior notes.
+
+    Failure policy, configuration, response-schema validation, and LOGGING are
+    all fail-closed / content-safe by design (see manifest header "Failure
+    policy", "No hardcoded key material or scheme", "Malformed-success
+    handling", and "Logging / anti-tunneling"): no PoC-specific key_id or
+    scheme value is baked into this file, any detector-reachability,
+    missing-configuration, or malformed-success-body failure BLOCKS the
+    response by default, and only a fixed, explicitly-validated set of fields
+    is ever logged -- the detector's raw response is NEVER echoed verbatim,
+    even on a well-formed 200, so a malfunctioning or compromised detector
+    cannot use its own response body as a channel to tunnel arbitrary content
+    into NeMo's logs.
+    """
+    import logging
+    import math
+    import os
+    from typing import Optional
+
+    import httpx
+
+    from nemoguardrails.actions import action
+
+    log = logging.getLogger(__name__)
+
+    DETECTOR_URL = os.environ.get("VLLM_WATERMARK_DETECTOR_URL", "http://detector:8000/v1/watermark/detect")
+
+    _RAW_POLICY = os.environ.get("WATERMARK_RAIL_FAILURE_POLICY", "closed").strip().lower()
+    if _RAW_POLICY not in ("closed", "open"):
+        log.warning(
+            "watermark_check: WATERMARK_RAIL_FAILURE_POLICY=%r is neither 'closed' nor "
+            "'open' -- defaulting to 'closed'.",
+            _RAW_POLICY,
+        )
+        FAILURE_POLICY = "closed"
+    else:
+        FAILURE_POLICY = _RAW_POLICY
+
+    if FAILURE_POLICY == "open":
+        log.warning(
+            "watermark_check: WATERMARK_RAIL_FAILURE_POLICY=open -- THIS IS A DELIBERATE "
+            "AVAILABILITY-OVER-COMPLIANCE CHOICE. On detector unreachability, a non-200 "
+            "or malformed detector response, or missing VLLM_WATERMARK_KEY_ID/"
+            "VLLM_WATERMARK_SCHEME/bot_message configuration, this rail will ALLOW the "
+            "response through UNCHECKED instead of blocking it. Do not run this policy "
+            "in a compliance-relevant deployment without an explicit, documented risk "
+            "acceptance."
+        )
+
+    # No hardcoded key_id or scheme fallback here on purpose: a reusable action
+    # must not embed a PoC-specific value (e.g. a literal "poc-2026-08" key_id).
+    # Both MUST be supplied via environment at deploy time -- in a real
+    # deployment, VLLM_WATERMARK_KEY_ID is sourced from the same `watermark-key`
+    # Secret the detector Deployment itself reads (see manifest header
+    # "Real-deployment env sourcing sketch"), not a literal value in this file.
+    if not os.environ.get("VLLM_WATERMARK_KEY_ID"):
+        log.warning(
+            "watermark_check: VLLM_WATERMARK_KEY_ID is not set at actions.py load time -- "
+            "every check will fail under WATERMARK_RAIL_FAILURE_POLICY=%s until it is "
+            "configured (see manifest header).",
+            FAILURE_POLICY,
+        )
+    if not os.environ.get("VLLM_WATERMARK_SCHEME"):
+        log.warning(
+            "watermark_check: VLLM_WATERMARK_SCHEME is not set at actions.py load time -- "
+            "every check will fail under WATERMARK_RAIL_FAILURE_POLICY=%s until it is "
+            "configured (see manifest header).",
+            FAILURE_POLICY,
+        )
+
+
+    def _apply_failure_policy(reason: str) -> bool:
+        """Apply WATERMARK_RAIL_FAILURE_POLICY to a detector-call, configuration,
+        or response-schema failure. Returns True (BLOCK) under "closed"
+        (default), False (ALLOW) under "open". Either way, always logs the
+        reason and the policy actually applied -- never a silent decision.
+        `reason` is a short, content-free failure code (exception class name /
+        HTTP status / missing-env-var name / observed TYPE, never a VALUE) --
+        never the checked text and never a detector-supplied value that could
+        itself carry attacker- or misconfiguration-controlled content."""
+        if FAILURE_POLICY == "open":
+            log.warning(
+                "watermark_check: FAILING OPEN (allowing response through UNCHECKED) "
+                "reason=%s policy=open",
+                reason,
+            )
+            return False
+        log.warning(
+            "watermark_check: FAILING CLOSED (blocking response) reason=%s policy=closed",
+            reason,
+        )
+        return True
+
+
+    def _safe_numeric(value: object) -> str:
+        """Return a LOG-SAFE string for a detector-supplied numeric field
+        (z_score / p_value). The detector's response is otherwise untrusted
+        input: if `value` is not a genuine, finite int/float (explicitly
+        excluding bool, which is a Python int subclass), this returns a
+        content-free `<invalid:TYPE>` marker instead of the value itself --
+        never echoes a non-numeric or non-finite detector-supplied value
+        verbatim. This is the fix for the log-tunneling defect: a prior
+        revision logged `result.get("z_score")`/`result.get("p_value")`
+        unconditionally, so a malfunctioning or compromised detector could
+        return `"z_score": "<arbitrary attacker string>"` and have it written
+        straight to the NeMo Guardrails process log."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return f"<invalid:{type(value).__name__}>"
+        if isinstance(value, float) and not math.isfinite(value):
+            return f"<invalid:non-finite-{type(value).__name__}>"
+        return repr(value)
+
+
+    @action(is_system_action=True)
+    async def watermark_check(context: Optional[dict] = None, **kwargs) -> bool:
+        """Output-rail action: POSTs context['bot_message'] to our detector and
+        returns True (block) iff the detector's verdict is True, OR the
+        failure/schema-validation policy says to fail closed.
+
+        Logging (content-safe by construction, never a passthrough of the
+        detector's raw response -- see `_safe_numeric` and the manifest
+        header's "Logging / anti-tunneling" section):
+          - the checked text itself is NEVER logged.
+          - `scheme` and `key_id` are logged as the REQUEST-LOCAL values this
+            action itself read from its own environment and sent to the
+            detector -- NEVER `result.get("scheme")` / `result.get("key_id")`,
+            which are detector-supplied and therefore untrusted.
+          - `verdict` is logged only after being validated as a genuine bool.
+          - `z_score` / `p_value` are logged only if `_safe_numeric` accepts
+            them as finite int/float; otherwise a content-free `<invalid:TYPE>`
+            marker is logged in their place.
+          - no other field from the detector's response (e.g. an unexpected
+            "extra" key) is ever logged, regardless of its name or value.
+
+        bot_message handling (explicit, tested):
+          - context missing entirely, or lacking a "bot_message" key at all:
+            an INTEGRATION FAILURE (something upstream is wired wrong) --
+            routed through the failure policy like any other failure.
+          - "bot_message" present but empty/None: HARMLESS -- there is no
+            text a watermark could have been missed on, so this passes
+            (allows) with a debug-level log, not a warning.
+        """
+        if not isinstance(context, dict) or "bot_message" not in context:
+            return _apply_failure_policy("bot_message missing from context (integration failure)")
+
+        bot_response = context["bot_message"]
+        if not bot_response:
+            log.debug("watermark_check: bot_message is empty -- nothing to scan, allowing.")
+            return False
+
+        if not isinstance(bot_response, str):
+            return _apply_failure_policy(f"bot_message is not a string: type={type(bot_response).__name__}")
+
+        key_id = os.environ.get("VLLM_WATERMARK_KEY_ID")
+        if not key_id:
+            return _apply_failure_policy("VLLM_WATERMARK_KEY_ID not set")
+
+        scheme = os.environ.get("VLLM_WATERMARK_SCHEME")
+        if not scheme:
+            return _apply_failure_policy("VLLM_WATERMARK_SCHEME not set")
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    DETECTOR_URL,
+                    json={"text": bot_response, "scheme": scheme, "key_id": key_id},
+                )
+        except httpx.HTTPError as exc:
+            return _apply_failure_policy(f"detector request failed: {type(exc).__name__}")
+
+        if resp.status_code != 200:
+            return _apply_failure_policy(f"detector http status={resp.status_code}")
+
+        # Malformed-success handling: a 200 is NOT automatically trusted. The
+        # body must parse as JSON, be a JSON object, contain a "verdict" key,
+        # and that key's value must be a genuine bool -- not a string/number/
+        # null that happens to be truthy/falsy. Any violation is a
+        # malformed-success case and is routed through the SAME failure
+        # policy as a transport error (fail closed by default), never
+        # silently treated as `bool(x)` (which would let a missing verdict,
+        # e.g. `{}`, fail OPEN as `bool(None) == False`).
+        try:
+            result = resp.json()
+        except Exception as exc:
+            return _apply_failure_policy(f"detector response not valid JSON: {type(exc).__name__}")
+
+        if not isinstance(result, dict):
+            return _apply_failure_policy(f"detector response JSON is not an object: type={type(result).__name__}")
+
+        if "verdict" not in result:
+            return _apply_failure_policy("detector response missing 'verdict' field")
+
+        verdict = result["verdict"]
+        if not isinstance(verdict, bool):
+            return _apply_failure_policy(f"detector response 'verdict' field is not boolean: type={type(verdict).__name__}")
+
+        # Anti-tunneling: log ONLY the request-local scheme/key_id (values WE
+        # sent, from env -- never the detector's echoed copies), the validated
+        # verdict, and z_score/p_value ONLY if they pass _safe_numeric. No
+        # other field from `result` (e.g. an unexpected "extra" key, or a
+        # detector-echoed "scheme"/"key_id" that could differ from what we
+        # sent) is ever referenced here.
+        log.info(
+            "watermark_check verdict=%s z_score=%s p_value=%s scheme=%s key_id=%s",
+            verdict,
+            _safe_numeric(result.get("z_score")),
+            _safe_numeric(result.get("p_value")),
+            scheme,
+            key_id,
+        )
+        return verdict
+  config.yml: |
+    # colang_version 1.0 is REQUIRED here: nemoguardrails==0.23.0's
+    # POST /v1/checks handler (nemoguardrails/server/api.py) hard-rejects any
+    # config where llm_rails.config.colang_version != "1.0" with a 422
+    # ("check_async does not support Colang 2.0 configurations"). 1.0 is also
+    # this library's own default (rails/llm/config.py:
+    # `colang_version: str = Field(default="1.0", ...)`) -- set explicitly
+    # here for clarity, not because it changes behavior vs. omitting it.
+    colang_version: "1.0"
+
+    models:
+      - type: main
+        engine: openai
+        model: placeholder
+        api_key_env_var: OPENAI_API_KEY
+        parameters:
+          base_url: "http://placeholder.invalid/v1"
+
+    rails:
+      output:
+        flows:
+          - watermark check
+  flows.co: |
+    # Colang 1.0 dialect (define flow / execute / bot / stop) -- REQUIRED by
+    # colang_version: "1.0" above. Syntax copied verbatim from the installed
+    # nemoguardrails==0.23.0 library's own
+    # nemoguardrails/library/self_check/output_check/flows.v1.co (an output
+    # rail calling a bool-returning action), substituting our own action name.
+    define bot refuse to respond
+      "I'm sorry, I can't respond to that."
+
+    define flow watermark check
+      $is_watermarked = execute watermark_check
+
+      if $is_watermarked
+        bot refuse to respond
+        stop
+kind: ConfigMap
+metadata:
+  name: nemo-watermark-config
+  namespace: watermark

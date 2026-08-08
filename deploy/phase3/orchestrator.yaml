@@ -39,10 +39,15 @@
 # repos/foundation-model-stack/fms-guardrails-orchestrator/releases` shows
 # `0.17.0` published 2025-09-22T17:34:26Z, one day before this image's build
 # timestamp, and `Cargo.toml` at that tag reads `version = "0.17.0"` --
-# consistent with `GET /health` on this image returning
+# and was PREDICTED to make `GET /health` return
 # `{"fms-guardrails-orchestr8":"0.17.0"}` (src/server.rs `health()`: a
-# `{CARGO_PKG_NAME: CARGO_PKG_VERSION}` map, verified by reading that
-# handler's source directly).
+# `{CARGO_PKG_NAME: CARGO_PKG_VERSION}` map).
+# CORRECTION (EXECUTED 2026-08-08, live deployment of exactly this digest):
+# /health on :8034 actually returns {"fms-guardrails-orchestr8":"0.16.0"} —
+# the release-date-proximity inference above was wrong by one minor version.
+# Nothing else changes: 0.16.0 ALSO predates the 0.18.3 path_prefix field,
+# so the scheme-wiring analysis below holds as written (and was confirmed
+# live: adding path_prefix was a silently-ignored no-op; see EXPERIMENTS.md).
 #
 # --- Config schema (FETCHED at the resolved image's OWN vintage, tag
 # `0.17.0` -- not just current `main`, since a schema that's true today
@@ -114,23 +119,19 @@
 # (`ServiceConfig`'s Deserialize impl has no `deny_unknown_fields`), leaving
 # BOTH `watermark-kgw` and `watermark-synthid` hitting the identical
 # unprefixed `/api/v1/text/contents` route with no way to tell them apart --
-# strictly worse than just not writing it. Choice (b), detector_params.scheme,
-# is therefore what this ConfigMap relies on.
+# strictly worse than just not writing it. Choice (b),
+# detector_params.scheme, WAS therefore the initial wiring this ConfigMap
+# relied on — until the twin-Deployment design below replaced it.
 #
-# CONSEQUENCE -- must be a hard requirement for callers, not a nicety:
-# `watermark-kgw` happens to work even with an EMPTY `detectors.watermark-kgw:
-# {}` request body, because the detector's own `WATERMARK_DETECTOR_SCHEME`
-# env default (detector-deploy.yaml) is `kgw` and the generic route falls
-# back to that default when `detector_params.scheme` is absent. But
-# `watermark-synthid` does NOT get its own default -- ONE running detector
-# process has exactly one `WATERMARK_DETECTOR_SCHEME` default, and it's set
-# to `kgw`. A caller who requests `watermark-synthid` WITHOUT
-# `"detector_params": {"scheme": "synthid"}` (or, in the `/api/v2/.../content`
-# request shape actually used here, WITHOUT `"detectors": {"watermark-synthid":
-# {"scheme": "synthid"}}`) silently gets a KGW-scored result mislabeled as
-# `watermark-synthid`, not an error. deploy/phase3/README.md's example
-# requests always pass `scheme` explicitly for BOTH detector ids for exactly
-# this reason -- copy those, do not simplify them to `{}`.
+# RESOLVED (2026-08-08, superseding the caller-requirement above): scheme
+# authority is now SERVER-SIDE. `watermark-synthid` routes to its own
+# Service/Deployment (`detector-synthid`, WATERMARK_DETECTOR_SCHEME=synthid;
+# see detector-synthid-deploy.yaml) and `watermark-kgw` to the kgw-scheme
+# Deployment -- a caller sending EMPTY `{}` params to either detector id
+# gets the CORRECT scheme (verified live: full verdict matrix with no
+# client scheme params, EXPERIMENTS.md raw-evidence addendum).
+# `detector_params.scheme` remains a supported PER-REQUEST OVERRIDE (the
+# orchestrator forwards it verbatim), not a requirement.
 #
 # FUTURE UPGRADE PATH (not applied here): if this Deployment's image is ever
 # bumped to an orchestrator build at or after commit 95b3b4d6f0 (roughly
@@ -168,14 +169,22 @@ data:
         # z-threshold verdict is true (default z>=4.0, see detector/app.py
         # WATERMARK_Z_THRESHOLD), which maps to score = clamp(1-p_value) far
         # above 0.5 in every case this repo has measured (EXPERIMENTS.md
-        # Phase 1: watermarked mean z 21.35 => p_value effectively 0,
+        # Phase 1 corrected single-instance run: watermarked mean z 13.41
+        # at delta 2.0/512 tok (the earlier 21.35 figure was the superseded
+        # double-instance measurement) => p_value effectively 0,
         # score ~1.0). 0.5 is a reasonable, conservative orchestrator-side
         # threshold given that.
         default_threshold: 0.5
       watermark-synthid:
         type: text_contents
         service:
-          hostname: detector
+          # Dedicated synthid-scheme Deployment (detector-synthid-deploy.yaml):
+          # the deployed trustyai@f3952b13… image self-reports orchestr8 0.16.0 and
+          # silently ignores the 0.18.3+ path_prefix field (EXECUTED 2026-08-08,
+          # EXPERIMENTS.md), so scheme authority lives in each Deployment's
+          # WATERMARK_DETECTOR_SCHEME env, and this entry must point at the
+          # synthid Service — NOT the shared "detector" Service.
+          hostname: detector-synthid
           port: 8000
           # -- FUTURE -- path_prefix: /synthid
         chunker_id: whole_doc_chunker
