@@ -1,14 +1,13 @@
 # Phase 0/1 — bare-pod vLLM on the GPU node (pre-RHOAI)
 
 Manifests in this directory stand up plain `vllm serve` (Phase 0 baseline)
-and the same thing with the KGW watermark plugin wired in (Phase 1), as
+and the same thing with the KGW and SynthID watermark plugins wired in
+(Phases 1/2), as
 one-off pods directly on the cluster's GPU node — **not** through
 OpenShift AI / RHOAI's ServingRuntime/InferenceService machinery, which is
-Phase 4 (`docs/implementation.md`). Written by a read-only cluster
-investigation task; every `oc`/`curl`/`skopeo` command below that
-produced evidence is reproduced verbatim in each manifest's header
-comment. This task did **not** apply anything to the cluster — the
-orchestrator does that, in the order below.
+Phase 4 (`docs/implementation.md`). This runbook was executed for Phases 0
+and 1 on 2026-08-08; commands and raw output are recorded in
+`EXPERIMENTS.md`, while the manifests below remain the reproducible source.
 
 ## Prerequisites
 
@@ -46,9 +45,9 @@ oc -n watermark wait --for=condition=Ready pod/vllm-baseline --timeout=15m
 
 `--timeout=15m` is generous, not a claim about actual cold-start time —
 first-run image pull is ~9.5GiB (see digest evidence in the pod manifest)
-plus model download into the `/models-cache` emptyDir on top of that;
-neither was measured in this task (no pod was started). Record the
-actual observed time-to-Ready in `EXPERIMENTS.md` when this is first run.
+plus model download into the `/models-cache` emptyDir on top of that. Consult
+the recorded Phase 0 run in `EXPERIMENTS.md` for the observed execution rather
+than treating this conservative timeout as a startup-time measurement.
 
 Smoke-test from inside the cluster (see §4 for the `bench` pod) or via a
 temporary port-forward:
@@ -70,9 +69,9 @@ whole package, a version-matched initContainer, etc.).
 ```bash
 # 1. Build the wheel locally (pure-Python; matches ANY Python 3.11+/3.14
 #    interpreter, so this does not need to match the pod's Python
-#    version — see build-wheel.sh header comment). TESTED 2026-08-08,
-#    output: dist/vllm_watermark-0.1.0.dev0-py3-none-any.whl (26500
-#    bytes). Re-run this whenever src/vllm_watermark/ changes.
+#    version — see build-wheel.sh header comment). The output path is
+#    dist/vllm_watermark-0.1.0.dev0-py3-none-any.whl; its size changes with
+#    the package. Re-run this whenever src/vllm_watermark/ changes.
 ./deploy/phase0/build-wheel.sh
 
 # 2. Delete vllm-baseline first if it's still running — the GPU node has

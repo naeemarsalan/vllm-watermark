@@ -1,5 +1,4 @@
-"""Static unit tests for SynthIDLogitsProcessor (Task B2: vLLM plugin
-wrapper).
+"""Static unit tests for the Phase 2 SynthIDLogitsProcessor wrapper.
 
 vLLM is not installed on this workstation -- see `tests/conftest.py`'s
 docstring for the stub it installs (shared with
@@ -7,9 +6,9 @@ docstring for the stub it installs (shared with
 collected, so `vllm_watermark.synthid.processor`'s module-level
 `from vllm.v1.sample.logits_processor import (...)` succeeds. Everything
 else this file exercises (`SynthIDConfig`, `process_scores_row`,
-`WatermarkKey.derive_subkeys`) is Task A2's real, non-stubbed code: this
+`WatermarkKey.derive_subkeys`) is real, non-stubbed code: this
 file is a wiring test for `synthid/processor.py`, not a reimplementation of
-Task A2's algorithm tests.
+the Phase 2 algorithm tests.
 
 Run with:
     PYTHONPATH=src /usr/bin/python3 -m pytest tests/test_synthid_processor_static.py -v
@@ -17,8 +16,8 @@ Run with:
 `pytest tests/test_synthid_processor_static.py` works without PYTHONPATH
 too)
 
-All key material below is an obviously-dummy test value (AGENTS.md #3 /
-CLAUDE.md secrets policy). The small `_Fake*` fixture classes and dummy
+All key material below is an obviously-dummy test value (AGENTS.md #3
+secrets policy). The small `_Fake*` fixture classes and dummy
 secrets below are intentionally duplicated (not shared via conftest.py)
 from `test_processor_static.py`'s own copies -- they are ~20 lines of
 trivial per-file test scaffolding, not the substantial vllm-stub-install

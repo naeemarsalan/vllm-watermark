@@ -199,11 +199,10 @@ class SynthIDConfig:
             lookup table. transformers default `2**16` (65536).
         sampling_table_seed: seed for building that table. transformers
             default 0. NOT secret -- the table itself carries no
-            watermark-identifying information on its own (see
-            `_sampling_table`); the `keys` are what makes the scheme
-            keyed. Nonetheless this repo always derives it from
-            `WatermarkKey` material when wiring a real deployment (Task B2),
-            same spirit as KGW.
+        watermark-identifying information on its own (see
+        `_sampling_table`); the `keys` are what makes the scheme keyed.
+        Deployments use the recorded public/default seed `0`; secret
+        per-layer keys are derived separately from `WatermarkKey`.
         context_history_size: size of the repeated-context history window a
             caller (not this module -- see module docstring) should keep.
             transformers default 1024. Carried here purely so one config

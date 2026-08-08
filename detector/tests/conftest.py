@@ -16,7 +16,7 @@ runs as `uvicorn app:app` from within the `detector/` directory (or
 is a LOCAL TEST convenience only, not something app.py itself relies on.
 
 All key material anywhere in this test suite is an obviously-dummy test
-value (AGENTS.md #3 / CLAUDE.md secrets policy) -- `"aa" * 16` is not used
+value (AGENTS.md #3 secrets policy) -- `"aa" * 16` is not used
 anywhere outside `detector/tests/`.
 """
 

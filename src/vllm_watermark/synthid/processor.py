@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SynthID-Text watermark vLLM V1 LogitsProcessor plugin (Task B2: plugin
-wrapper).
+"""SynthID-Text watermark vLLM V1 LogitsProcessor plugin (Phase 2 wrapper).
 
-Structured to mirror `vllm_watermark.kgw.processor` (Task B, KGW's plugin
+Structured to mirror `vllm_watermark.kgw.processor` (the KGW plugin
 wrapper) as closely as the two algorithms allow: same `LogitsProcessor`
 ABC, same sparse per-row `dict[int, RowState]` bookkeeping, same
 added/removed/moved `update_state()` protocol (adapted from
@@ -14,7 +13,7 @@ too" pattern, same vLLM V1 citations (`docs/api-notes-vllm-v0.18.0.md`).
 This is the ONLY module in this package that imports `vllm` (see
 `kgw/processor.py` module docstring for why -- same reasoning applies
 verbatim; the actual SynthID tournament-sampling math lives in vllm-free
-`vllm_watermark.synthid.core` / `vllm_watermark.synthid.detector`, Task A2).
+`vllm_watermark.synthid.core` / `vllm_watermark.synthid.detector`).
 
 Unlike `kgw/processor.py`, THIS file does not port any algorithm logic from
 an upstream source itself -- it is pure wiring, plus several DESIGN
@@ -40,7 +39,7 @@ request's resolved scheme (per-request `watermark_scheme` extra_arg, or
 
 DESIGN DECISION 1 -- context extraction across the prompt/output boundary
 ---------------------------------------------------------------------------
-The Task interface contract (shared design doc, not an upstream source)
+The Phase 2 interface contract (shared design doc, not an upstream source)
 specifies: "the last (ngram_len-1)-token context comes from
 prompt_tok_ids/output_tok_ids refs at apply() time (same pattern as KGW's
 prev_token)". This is a DELIBERATE DEVIATION from how
@@ -151,7 +150,7 @@ DESIGN DECISION 5 -- per-tournament-layer key derivation label
 tournament-layer keys from one configured secret, namespaced by an
 arbitrary `label` (see that method's docstring -- "different subkey
 purposes drawn from the same secret ... never collide"). This module fixes
-`_SYNTHID_KEY_LABEL` below as ITS label. CROSS-TASK COORDINATION NOTE: any
+`_SYNTHID_KEY_LABEL` below as ITS label. COORDINATION NOTE: any
 detection-side caller (the shipped one is `detector/app.py`, which reads the
 canonical constants from `vllm_watermark.synthid.core`) that reconstructs a
 `SynthIDConfig` from a `WatermarkKey` to verify text this processor

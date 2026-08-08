@@ -8,7 +8,7 @@ JSON row per successful completion to --out as it goes, so a partial run
 still leaves a usable, valid JSONL file. stdlib + requests only -- no
 torch/transformers -- so this can run inside a lightweight bench pod.
 
-Per CLAUDE.md task spec, the request body's `vllm_xargs` is set as:
+Per the Phase 1/2 protocol, the request body's `vllm_xargs` is set as:
     --watermark on   -> {"watermark": "on", "watermark_key_id": KEY}
     --watermark off  -> {"watermark": "off"}
 KEY is --key-id if given, else "default" (matching vllm_watermark.keys'
@@ -77,7 +77,7 @@ def load_prompts(path: str) -> list[str]:
 
 
 def build_prompts(prompts: list[str], n: int) -> list[str]:
-    """Cycle `prompts` (modulo) up to n items. Per CLAUDE.md task spec:
+    """Cycle `prompts` (modulo) up to n items. Per the benchmark protocol:
     "Cycles prompts if n > #prompts (append ' (variation N)' to repeated
     prompts to vary)." N is the 1-indexed cycle/pass number; the first
     pass through the prompt list is left unmodified so byte-identical
@@ -160,7 +160,7 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.api_key:
         headers["Authorization"] = f"Bearer {args.api_key}"
 
-    # Per CLAUDE.md task spec: the "on" case's vllm_xargs body always
+    # Per the Phase 1/2 protocol, the "on" case's vllm_xargs body always
     # carries watermark_key_id (not only when --key-id was explicitly
     # passed). "default" mirrors vllm_watermark.keys' own fallback key_id
     # name (WATERMARK_KEY_ID env or "default" -- see src/vllm_watermark/

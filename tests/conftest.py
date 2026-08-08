@@ -4,9 +4,8 @@ directory (currently `test_processor_static.py` for
 `vllm_watermark.synthid.processor`).
 
 Two things live here so neither test file has to duplicate them (moved out
-of `test_processor_static.py`, which used to own this logic alone, per the
-Task B2 instruction "reuse the existing vllm-stub pattern (import it,
-don't duplicate)"):
+of `test_processor_static.py`, which used to own this logic alone, to reuse
+the existing vLLM-stub pattern without duplication):
 
 1. `src/`-on-`sys.path` bootstrap -- makes the src-layout package importable
    when running pytest from the repo root without an editable install (the
@@ -47,7 +46,7 @@ module reads (see `vllm_watermark.kgw.processor` and
 reads directly").
 
 All key material anywhere in the test suite is an obviously-dummy test
-value (AGENTS.md #3 / CLAUDE.md secrets policy).
+value (AGENTS.md #3 secrets policy).
 """
 
 from __future__ import annotations

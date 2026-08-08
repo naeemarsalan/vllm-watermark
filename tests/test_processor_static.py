@@ -1,4 +1,4 @@
-"""Static unit tests for KGWLogitsProcessor (Task B: vLLM plugin wrapper).
+"""Static unit tests for the Phase 1 KGWLogitsProcessor wrapper.
 
 vLLM is not installed on this workstation (AGENTS.md environment facts;
 docs/api-notes-vllm-v0.18.0.md), so `vllm_watermark.kgw.processor` cannot be
@@ -9,9 +9,9 @@ into `sys.modules` (or leaves real vLLM in place if it's actually
 installed) BEFORE this file is collected -- see that module's docstring for
 the full rationale (shared, not duplicated, with
 `test_synthid_processor_static.py`). Everything else in this file
-(KGWConfig, greenlist_ids, WatermarkKey, load_key/load_keys) is Task A's
+(KGWConfig, greenlist_ids, WatermarkKey, load_key/load_keys) is the real
 real, non-stubbed code: this file is a wiring test for processor.py, not a
-reimplementation of Task A's algorithm tests (see
+reimplementation of the algorithm-equivalence tests (see
 tests/test_kgw_equivalence.py for those).
 
 Run with:
@@ -19,11 +19,10 @@ Run with:
 (conftest.py self-inserts src/ onto sys.path so plain
 `pytest tests/test_processor_static.py` works without PYTHONPATH too)
 
-All key material below is an obviously-dummy test value (AGENTS.md #3 /
-CLAUDE.md secrets policy: "Test/demo keys in tests must be obviously-dummy
-values").
+All key material below is an obviously-dummy test value (AGENTS.md #3:
+test/demo keys in tests must be obviously dummy values).
 
-Env-var pattern used throughout (important -- see keys.py, Task A):
+Env-var pattern used throughout (important -- see keys.py):
   * `WATERMARK_KEY=<hex>` (singular) auto-registers key_id "default", so it
     is used whenever a test wants a row with NO explicit `watermark_key_id`
     in extra_args to resolve via KGWLogitsProcessor's default-key logic.

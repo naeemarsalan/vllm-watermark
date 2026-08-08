@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""KGW watermark vLLM V1 LogitsProcessor plugin (Task B: plugin wrapper).
+"""KGW watermark vLLM V1 LogitsProcessor plugin (Phase 1 wrapper).
 
-This is the ONLY module in this package that imports `vllm` (see AGENTS.md /
-CLAUDE.md task constraint: "package top-level stays vllm-free" -- `vllm` is
-not installed on the local dev workstation, see docs/cluster.md). The actual
+This module imports `vllm`; the package top level and algorithm modules stay
+vllm-free so local detector execution does not require vLLM. `vllm` is
+not installed on the local dev workstation (see docs/cluster.md). The actual
 KGW hashing/greenlist math lives in vllm-free `vllm_watermark.kgw.core`
-(Task A); key loading lives in vllm-free `vllm_watermark.keys` (Task A).
+(the Phase 1 algorithm); key loading lives in vllm-free
+`vllm_watermark.keys`.
 This module is pure wiring: vLLM's V1 custom-LogitsProcessor ABC <->
 KGWConfig/greenlist_ids/WatermarkKey.
 

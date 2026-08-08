@@ -9,11 +9,10 @@ to it in detection-only mode (`orchestrator.yaml`), on plain OpenShift 4.20
 (`docs/implementation.md`) — this phase deploys the upstream
 `foundation-model-stack/fms-guardrails-orchestrator` project directly.
 
-Written by a read-only cluster-inspection task per its brief — **nothing in
-this directory has been applied to the cluster**. Every `oc`/`curl`/
-`skopeo`/`gh api` command that produced evidence cited in a manifest's
-header comment is reproducible verbatim; the orchestrator applies manifests
-in the order below.
+The runbook was executed on the cluster on 2026-08-08. Every `oc`/`curl`/
+`skopeo`/`gh api` command supporting the execution claims is recorded in
+`EXPERIMENTS.md`; the manifests below remain the reproducible deployment
+source.
 
 CPU-only throughout (tokenizer + torch CPU scoring for the detector; a
 stateless Rust HTTP proxy for the orchestrator) — **no GPU node needed**,
@@ -39,7 +38,7 @@ export KUBECONFIG=cluster/auth/kubeconfig   # repo-root relative; gitignored, ne
 - **`pyyaml`**: used below only to validate this directory's own YAML syntax
   locally, not by anything that runs in-cluster. Already present on the
   local workstation (`python3 -c "import yaml; print(yaml.__version__)"` →
-  `6.0.2`, checked by this task — no `pip install` was needed).
+  `6.0.2` in the recorded environment — no `pip install` was needed).
 
 ## 1. Build the wheel
 
@@ -140,7 +139,7 @@ oc -n watermark wait --for=condition=Available deploy/orchestrator --timeout=3m
 ```bash
 oc -n watermark port-forward svc/orchestrator 8034:8034 &
 curl -s http://localhost:8034/health
-# -> {"fms-guardrails-orchestr8":"0.17.0"}
+# -> {"fms-guardrails-orchestr8":"0.16.0"}
 ```
 
 If this 503s or connection-refuses, check `oc -n watermark logs
@@ -229,14 +228,15 @@ curl -s http://localhost:8033/api/v2/text/detection/content \
       }'
 ```
 
-**SynthID** (`scheme` REQUIRED, per "Scheme wiring" above):
+**SynthID** (empty params; the dedicated Service makes scheme authority
+server-side):
 
 ```bash
 curl -s http://localhost:8033/api/v2/text/detection/content \
   -H 'Content-Type: application/json' \
   -d '{
         "content": "<paste a known-watermarked SynthID sample here>",
-        "detectors": {"watermark-synthid": {"scheme": "synthid"}}
+        "detectors": {"watermark-synthid": {}}
       }'
 ```
 
@@ -277,23 +277,15 @@ see `detector/app.py`'s docstring citation of the upstream
 `detectors/huggingface/detector.py` behavior it mirrors), so the orchestrator
 response for unwatermarked/human text is `{"detections": []}`, not an error.
 
-**Note (unconfirmed, flagged honestly):** `ContentAnalysisResponse.detector_id`
-is `Option<String>` in the orchestrator's own schema, and a single request
-CAN name multiple detectors at once (e.g. `"detectors": {"watermark-kgw":
-{}, "watermark-synthid": {"scheme": "synthid"}}`) since `detectors` is a
-map. This task traced that `detector_id` exists as a field and that the
-per-detector request loop carries a `detector_id` value
-(`src/orchestrator/common/client.rs::detect_text_contents`), but did **not**
-trace the exact line that stamps it onto each response entry for this
-specific endpoint — treat "the combined-request response reliably
-disambiguates which entries came from which detector via `detector_id`" as
-`OPEN` until executed and observed directly, and prefer separate one-detector
-requests (as shown above) if that distinction matters for your use.
+`ContentAnalysisResponse.detector_id` disambiguation was also executed: one
+request naming both detectors returned only the matching detection with the
+correct detector id. The raw verdict matrix is in `EXPERIMENTS.md`.
 
 ## 7. Teardown
 
 ```bash
 oc -n watermark delete -f deploy/phase3/orchestrator.yaml --ignore-not-found
+oc -n watermark delete -f deploy/phase3/detector-synthid-deploy.yaml --ignore-not-found
 oc -n watermark delete -f deploy/phase3/detector-deploy.yaml --ignore-not-found
 oc -n watermark delete -f deploy/phase3/detector-build.yaml --ignore-not-found
 rm -rf /tmp/detector-build-ctx
@@ -327,10 +319,9 @@ for p in sorted(pathlib.Path('deploy/phase3').glob('*.yaml')):
 "
 ```
 
-Re-run the command above for the current result; it parses all four manifests (all four manifests + the repo-root `.dockerignore`'s absence of YAML
-syntax, since it's a plain-text ignore file, not YAML). This confirms only
-that the files PARSE as valid YAML — it is not a schema validation against
-the BuildConfig/Deployment/ConfigMap/Service OpenAPI schemas (no cluster
-access was used to do that; `oc apply --dry-run=server` against a live
-4.20 API server would be the next, stronger check, left to the
-orchestrator).
+Re-run the command above for the current result; it parses all five YAML
+manifests. The repo-root `.dockerignore` is plain text and is not part of this
+check. This confirms only that the files parse as valid YAML. The stronger
+`oc apply --dry-run=server` check against the live OpenShift 4.20 API was
+also executed for every Phase 3 object; its raw output and the bare vLLM
+PodSecurity warning are recorded in `EXPERIMENTS.md`.

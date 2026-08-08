@@ -1346,3 +1346,128 @@ model_tokenizer=`Qwen/Qwen2.5-0.5B-Instruct` vocab_size=`151936` key_id=`poc-202
 - n varies by truncation length: a row is scored at length L only if it has >= L scored tokens (shorter completions are excluded, counted in n_skipped_too_short in the JSON). Control corpora generated/chunked at ~256 tokens therefore have n=0 at the 512 row unless a 512-token control corpus is supplied.
 - `not present` cells mean that --*-corpus flag was omitted, not a scoring failure.
 
+## 2026-08-08 — Independent post-push review correction
+
+This append-only correction supersedes the audit addendum's unqualified
+"phrase sweep clean" statement. That sweep did not catch repository-internal
+instruction references (`CLAUDE.md`, `Task A2/B2/B3/C3`, and workflow narration).
+Explicit `CLAUDE.md` references were removed from the active source, test, benchmark,
+and deployment files touched by this correction, but older append-only evidence and
+several research/API-note files still retain historical task/workflow language. The
+AGENTS.md content-policy criterion is therefore **not fully closed**; the standalone
+review artifact records it as an open repository-hygiene finding rather than claiming
+a clean sweep.
+
+The review also found and corrected stale runbook statements without changing runtime
+behavior: Phase 0/3 README files now say the cluster paths were executed; Phase 3 health
+expects the measured orchestrator 0.16.0; SynthID uses empty client params with the
+twin-Service server-side routing; combined-detector attribution is recorded as executed;
+teardown includes `detector-synthid`; the YAML count is five; and the obsolete detector
+container sketch now points to the executed Dockerfile/build path. The Phase 1 Pod header
+now agrees with its actual entry-point-only loading, avoiding the previously measured
+double-load trap.
+
+### Focused verification after the correction
+
+```
+$ /usr/bin/python3 -m pytest -q detector/tests tests/test_processor_static.py tests/test_synthid_processor_static.py
+........................................................ [ 55%]
+.........................................................                [100%]
+129 passed, 192 warnings in 125.36s (0:02:05)
+```
+
+```
+$ python3 -m py_compile src/vllm_watermark/__init__.py src/vllm_watermark/keys.py src/vllm_watermark/kgw/processor.py src/vllm_watermark/synthid/core.py src/vllm_watermark/synthid/processor.py detector/app.py benchmarks/gen_corpus.py benchmarks/analyze_detection.py
+# no output; exit 0
+
+$ python3 - <<'PY'
+from pathlib import Path
+import yaml
+for path in sorted(Path('deploy/phase3').glob('*.yaml')):
+    docs = list(yaml.safe_load_all(path.read_text()))
+    print(f'{path}: {len(docs)} document(s) OK')
+PY
+deploy/phase3/detector-build.yaml: 2 document(s) OK
+deploy/phase3/detector-deploy.yaml: 2 document(s) OK
+deploy/phase3/detector-synthid-deploy.yaml: 2 document(s) OK
+deploy/phase3/nemo-guardrails-poc.yaml: 1 document(s) OK
+deploy/phase3/orchestrator.yaml: 3 document(s) OK
+```
+
+Server-side dry-run accepted every Phase 0/3 object. It also produced a real
+PodSecurity warning for the bare Phase 1 vLLM Pod; the warning is preserved here as
+an open Phase 4 hardening item rather than hidden:
+
+```
+$ KUBECONFIG=cluster/auth/kubeconfig oc apply --dry-run=server \
+    -f deploy/phase0/vllm-watermark-pod.yaml \
+    -f deploy/phase3/detector-build.yaml \
+    -f deploy/phase3/detector-deploy.yaml \
+    -f deploy/phase3/detector-synthid-deploy.yaml \
+    -f deploy/phase3/orchestrator.yaml \
+    -f deploy/phase3/nemo-guardrails-poc.yaml -o name
+pod/vllm-watermark
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "vllm" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "vllm" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "vllm" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "vllm" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+imagestream.image.openshift.io/detector
+buildconfig.build.openshift.io/detector
+service/detector
+deployment.apps/detector
+service/detector-synthid
+deployment.apps/detector-synthid
+configmap/orchestrator-config
+service/orchestrator
+deployment.apps/orchestrator
+configmap/nemo-watermark-config
+```
+
+### Live closing state
+
+```
+$ KUBECONFIG=cluster/auth/kubeconfig oc -n watermark get deploy -o custom-columns='NAME:.metadata.name,READY:.status.readyReplicas,CURRENT:.status.replicas'
+NAME               READY   CURRENT
+detector           1       1
+detector-synthid   1       1
+orchestrator       1       1
+
+$ KUBECONFIG=cluster/auth/kubeconfig oc -n watermark get pods -o custom-columns='NAME:.metadata.name,READY:.status.containerStatuses[*].ready,PHASE:.status.phase'
+NAME                                READY   PHASE
+bench                               true    Running
+detector-1-build                    false   Succeeded
+detector-676674bdd4-s45sr           true    Running
+detector-synthid-779c8c4f6-6xm6r   true    Running
+orchestrator-6d66dbb944-p4k7t      true    Running
+
+$ KUBECONFIG=cluster/auth/kubeconfig oc -n watermark exec bench -- python3 -c 'import urllib.request; print(urllib.request.urlopen("http://orchestrator:8034/health",timeout=10).read().decode()); print(urllib.request.urlopen("http://orchestrator:8034/info",timeout=10).read().decode())'
+{"fms-guardrails-orchestr8":"0.16.0"}
+{"services":{"watermark-synthid":{"status":"HEALTHY"},"watermark-kgw":{"status":"HEALTHY"}}}
+
+$ KUBECONFIG=cluster/auth/kubeconfig oc -n openshift-machine-api get machineset ocp-ai-p9j4n-gpu-us-east-1a -o custom-columns='NAME:.metadata.name,DESIRED:.spec.replicas,CURRENT:.status.replicas,READY:.status.readyReplicas'
+NAME                          DESIRED   CURRENT   READY
+ocp-ai-p9j4n-gpu-us-east-1a   0         0         <none>
+```
+
+### Newly found detector configuration-validation gap
+
+This is an executed negative probe, not a fix claim. `load_settings()` accepts values
+that should make startup/readiness fail. `WATERMARK_Z_THRESHOLD=nan` is the most severe:
+comparisons against NaN are false, so it can silently suppress positive verdicts. The
+other invalid values fail later while constructing per-request detector configs.
+
+```
+$ PYTHONPATH=src /usr/bin/python3 - <<'PY'
+from detector.app import load_settings
+for name, env in [
+    ('nan-threshold', {'WATERMARK_Z_THRESHOLD':'nan'}),
+    ('zero-depth', {'VLLM_WATERMARK_SYNTHID_KEY_DEPTH':'0'}),
+    ('zero-ngram', {'VLLM_WATERMARK_SYNTHID_NGRAM_LEN':'0'}),
+    ('bad-gamma', {'VLLM_WATERMARK_GAMMA':'2'}),
+]:
+    s = load_settings(env)
+    print(name, 'ACCEPTED', repr(s.z_threshold), s.synthid_key_depth,
+          s.synthid_ngram_len, s.kgw_gamma)
+PY
+nan-threshold ACCEPTED nan 30 5 0.25
+zero-depth ACCEPTED 4.0 0 5 0.25
+zero-ngram ACCEPTED 4.0 30 0 0.25
+bad-gamma ACCEPTED 4.0 30 5 2.0
+```

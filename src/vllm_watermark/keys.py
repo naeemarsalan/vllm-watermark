@@ -1,9 +1,9 @@
 """Watermark key loading.
 
 Keys never come from source code, never have a hardcoded fallback, and are
-never logged/printed in cleartext. See AGENTS.md #3 (secrets) and CLAUDE.md
-task instructions: "watermark keys come from env vars only. Never hardcode
-a production key. ... Never print key material."
+never logged/printed in cleartext. See AGENTS.md #3: watermark keys come
+from environment variables or mounted Secrets, are never hardcoded, and
+key material is never printed.
 
 Env var formats supported (checked in this order):
 
@@ -28,7 +28,7 @@ endian unsigned integer. This gives a full-range uniformly-derived 64-bit
 hash_key from an arbitrary-length secret, without ever using the raw
 secret bytes as the hash_key directly.
 
-SynthID subkey derivation (`WatermarkKey.derive_subkeys`, added for Task A2)
+SynthID subkey derivation (`WatermarkKey.derive_subkeys`, added in Phase 2)
 ------------------------------------------------------------------------------
 SynthID-Text needs a *list* of integer keys, one per tournament layer/depth
 (default depth 30 -- see `vllm_watermark.synthid.core.DEFAULT_SYNTHID_DEPTH`),

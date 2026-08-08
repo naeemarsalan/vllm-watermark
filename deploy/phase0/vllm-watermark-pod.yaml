@@ -1,6 +1,6 @@
 # Phase 1: same base image/model/sizing as vllm-baseline-pod.yaml, plus
-# the KGW watermark plugin (src/vllm_watermark, Task B) wired in via
-# `--logits-processors vllm_watermark.kgw.processor:KGWLogitsProcessor`.
+# KGW and SynthID watermark plugins from the installed wheel, loaded once
+# through the `vllm.logits_processors` entry-point group.
 #
 # --- Wheel-injection design (why this shape, not something simpler) -----
 # The package is pure-Python with zero compiled extensions (only runtime
@@ -48,22 +48,18 @@
 # SCC posture) is identical to vllm-baseline-pod.yaml -- see that file's
 # header comment for the full evidence trail; not repeated here.
 #
-# --- vllm_xargs / --logits-processors flag notes -------------------------
-# `--logits-processors` (hyphenated, not `--logits_processors`) and the
-# FQCN colon-separator format (`module.path:ClassName`) are both verified
-# against the actual v0.18.0 tagged vLLM source, not vLLM's own docs prose
-# (which has both of those wrong) -- see
-# docs/api-notes-vllm-v0.18.0.md §3 (already verified by Task B; not
-# re-verified independently here, just reused).
+# --- vllm_xargs / logits-processor loading notes -------------------------
+# v0.18.0 supports both installed entry points and the
+# `--logits-processors` FQCN flag, but combines them without deduplication.
+# This manifest therefore uses entry points only; see
+# docs/api-notes-vllm-v0.18.0.md §3 and the executed double-load correction
+# in EXPERIMENTS.md.
 # `vllm_xargs` (the REST field carrying `watermark`/`watermark_key_id` to
 # KGWLogitsProcessor -- see src/vllm_watermark/kgw/processor.py) needs NO
 # separate enable flag in v0.18.0: `vllm_xargs` is an unconditional
 # Pydantic field on both ChatCompletionRequest and CompletionRequest (no
 # gating flag was found anywhere in vllm/engine/arg_utils.py during that
-# same source review) -- see docs/api-notes-vllm-v0.18.0.md §7. (Also not
-# re-verified independently here; reused from Task B's already-EXECUTED-
-# equivalent source review, itself STATIC since it's a source read, not a
-# vLLM run.)
+# same source review) -- see docs/api-notes-vllm-v0.18.0.md §7.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -92,8 +88,8 @@ spec:
       # (rather than just supplying `args:` like vllm-baseline-pod.yaml
       # does) so we can wait-then-install-then-exec inside a shell. The
       # final `exec vllm serve ...` line reproduces the same `vllm serve`
-      # invocation the baseline pod gets via `args:`, plus
-      # `--logits-processors`.
+      # invocation the baseline pod gets via `args:`; the installed wheel's
+      # entry points supply the processors.
       command:
         - sh
         - -c

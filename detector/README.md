@@ -1,6 +1,6 @@
 # vllm-watermark detector service
 
-Task B3 (Phase 3, `docs/implementation.md`). A standalone HTTP service that wraps the
+Phase 3 of `docs/implementation.md`: a standalone HTTP service that wraps the
 **existing** watermark detectors in `src/vllm_watermark` (imported, not reimplemented:
 `vllm_watermark.kgw.detector`, `vllm_watermark.synthid.detector`, `vllm_watermark.keys`,
 `vllm_watermark.synthid.core`) behind two surfaces:
@@ -22,11 +22,11 @@ on this workstation.
 `docs/facts.md` C5 confirms the TrustyAI/FMS Guardrails Orchestrator accepts any detector
 implementing `POST /api/v1/text/contents`. But `docs/facts.md` C11/D5 also record, `OFFICIAL-SRC`,
 that RHOAI 3.4 documentation labels FMS Guardrails **legacy** and directs users to NeMo
-Guardrails — whether/how NeMo's extension surface can call a detector like this one is still
-`OPEN` (D5) as of this task. This service targets the FMS contract because it is a real,
-fetched, well-defined API surface today (see citation below) — not a claim that it is the
-recommended production integration path going forward. Re-verify against the current NeMo
-Guardrails extension surface before treating this as the final integration.
+Guardrails. The upstream NeMo 0.23.0 custom-action path was executed successfully; the
+RHOAI-managed `NemoGuardrails` CR path, shipped version, and retention mitigation remain
+`OPEN` in D5 for Phase 4. This service targets the FMS contract because it is a real,
+fetched, well-defined API surface, not because the legacy RHOAI packaging is the
+recommended long-term production path.
 
 ## TrustyAI contract — fetched, not from memory
 
@@ -60,7 +60,7 @@ Response: one list per submitted content, **in order** — an empty list means "
 watermarked"; a positive detection is one `ContentAnalysisResponse` spanning the whole content
 (`start=0, end=len(content)`).
 
-Scheme selection (per Task B3 spec):
+Scheme selection:
 
 1. `detector_params.scheme` (`"kgw"` | `"synthid"`), if the orchestrator forwards `detector_params`.
 2. Else env `WATERMARK_DETECTOR_SCHEME` (default `"kgw"`).
@@ -110,8 +110,8 @@ z-score/verdict were actually computed from — `mean_g` is always the unweighte
 comparability regardless of `scorer`).
 
 `texts` (batch) response: `{"results": [<one flat object per text, in order>, ...], "signature":
-..., "signing": ...}` — a design extension beyond the single-object shape in the Task B3 line
-item, documented here and in `app.py`'s `DetectRequest` docstring. The whole batch is atomic: if
+..., "signing": ...}` — a documented design extension beyond the single-object shape,
+also covered in `app.py`'s `DetectRequest` docstring. The whole batch is atomic: if
 any text is too short to score for the requested scheme, the whole request 422s (naming which
 `texts[i]` failed), rather than inventing a per-item partial-failure schema.
 
@@ -174,8 +174,9 @@ decoded = jwt.api_jws.decode_complete(
 
 ## Zero retention (Code of Practice measure)
 
-Submitted text is **never logged, never persisted, never embedded in an exception message**. The
-only content-derived value ever logged is `sha256(content.encode("utf-8")).hexdigest()[:16]`,
+The detector is designed not to log or persist submitted text and not to embed it in
+exception messages. The only content-derived value its application logging emits is
+`sha256(content.encode("utf-8")).hexdigest()[:16]`,
 alongside the resolved scheme/key_id/verdict/latency. This service adds **no** request-body
 logging middleware — `detector/tests/test_service.py::TestZeroRetention::test_no_body_logging_middleware_installed`
 asserts `app.user_middleware == []`, and
@@ -188,7 +189,7 @@ detection mechanism must be *available* for Art. 50(2) compliance; `docs/impleme
 Phase 3 calls for "zero retention of submitted content... log only hashes plus verdicts" as an
 engineering design goal — this service implements that design goal. Whether that specific
 zero-retention shape is itself a **Code of Practice** *requirement* (as opposed to sound
-engineering practice this task adopts) remains `OPEN` per `docs/implementation.md` Phase 3 ("Verify
+engineering practice adopted here) remains `OPEN` per `docs/implementation.md` Phase 3 ("Verify
 and register the exact source before describing zero retention as a Code requirement") — this
 service does not claim otherwise.
 
@@ -254,21 +255,11 @@ cd detector && uvicorn app:app --host 0.0.0.0 --port 8080
 
 ## Container build
 
-Per Task B3: "its container installs the vllm-watermark wheel + detector deps". Sketch (not
-executed on this task — no cluster write access; see AGENTS.md §Cluster):
-
-```dockerfile
-FROM registry.access.redhat.com/ubi9/python-312:latest
-COPY dist/vllm_watermark-*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/vllm_watermark-*.whl
-COPY detector/requirements.txt /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements.txt \
-        --extra-index-url https://download.pytorch.org/whl/cpu
-COPY detector/app.py /app/app.py
-WORKDIR /app
-EXPOSE 8080
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
-```
+The executed container definition is `detector/Dockerfile`; the on-cluster binary
+build and deployment commands are in `deploy/phase3/README.md`. The recorded image
+build installs the wheel, CPU-only torch, and pinned detector dependencies and serves
+on port 8000. Do not use an unexecuted alternative Dockerfile sketch as a deployment
+source.
 
 ## Tests
 

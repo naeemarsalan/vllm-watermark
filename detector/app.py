@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Watermark detector service (Task B3, Phase 3).
+"""Watermark detector service (Phase 3).
 
 Wraps the EXISTING, vllm-free detectors from `vllm_watermark` (imported, not
 reimplemented: `vllm_watermark.kgw.detector`, `vllm_watermark.synthid.detector`,
@@ -11,7 +11,8 @@ surfaces:
    registered as a guardrails detector on the legacy FMS path (docs/facts.md
    C5) -- NOT a claim that this is the recommended future RHOAI integration
    path; docs/facts.md C11/D5 record that NeMo Guardrails fit is still
-   `OPEN` and must be verified separately. Two scheme-forced alias routes
+   partially open: the upstream NeMo 0.23.0 custom-action path is executed,
+   while the RHOAI-managed CR path remains for Phase 4. Two scheme-forced alias routes
    (`/kgw/api/v1/text/contents`, `/synthid/api/v1/text/contents`) are also
    exposed -- see "Scheme selection" below.
 2. A direct `POST /v1/watermark/detect` endpoint returning our own
@@ -75,7 +76,7 @@ names below are PORTED VERBATIM (pydantic model shapes) from:
     detectors: `start=0, end=len(text)`-shaped `ContentAnalysisResponse`
     rows are a normal, existing pattern for this API, not a new invention.
 
-Scheme selection (per Task B3 spec)
+Scheme selection
 ------------------------------------
 `detector_params.scheme` ("kgw"|"synthid"), if the orchestrator forwards
 `detector_params` -- else env `WATERMARK_DETECTOR_SCHEME` (default "kgw").
@@ -91,7 +92,7 @@ insurance: the orchestrator can register two detector entries (one per
 alias route) and get correct per-scheme behavior even with zero
 `detector_params` forwarding support.
 
-Calibrated `score` mapping (documented, per Task B3 spec)
+Calibrated `score` mapping
 ------------------------------------------------------------
 Every detector in this package (`kgw.detector`, `synthid.detector`) already
 computes an exact one-sided upper-tail normal p-value
@@ -143,8 +144,8 @@ sign/verify round trips, a tamper-detection negative case, and PEM
 load/type-detection were all exercised at a Python prompt before this was
 written, then pinned as `TestSigning` in `detector/tests/test_service.py`,
 which is the executed, re-runnable record of this claim -- not EXPERIMENTS.md,
-which is outside this task's edit scope; see that file's own module
-docstring) over the canonical JSON encoding of the response payload EXCLUDING the
+with the aggregate execution evidence recorded in `EXPERIMENTS.md`) over
+the canonical JSON encoding of the response payload EXCLUDING the
 `signature`/`signing` fields themselves (`json.dumps(payload, sort_keys=True,
 separators=(",", ":"), allow_nan=False).encode("utf-8")` -- see
 `_canonical_json_bytes`). The algorithm (`RS256` for an RSA key, `EdDSA`
@@ -225,7 +226,7 @@ logged with its value if it is key material)
         docstring). `VLLM_WATERMARK_SYNTHID_KEY_DEPTH` defaults to
         `vllm_watermark.synthid.core.DEFAULT_SYNTHID_DEPTH` (30) and subkeys
         are derived with `vllm_watermark.synthid.core.SYNTHID_KEY_LABEL` --
-        the EXACT constants the generation side uses (per Task B3 spec).
+        the EXACT constants the generation side uses.
     SIGNING_KEY_PATH, SIGNING_KEY_ID   see "JWS signing" above.
         SIGNING_KEY_ID (optional) becomes the JWS header's `kid` claim.
 """

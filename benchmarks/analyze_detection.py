@@ -109,7 +109,7 @@ from vllm_watermark.kgw.detector import DEFAULT_Z_THRESHOLD, detect_text  # noqa
 # against the contract and mark untested") this whole block must not break
 # `--scheme kgw` (the default) usage if vllm_watermark.synthid is ever absent
 # from a checkout. See main()'s --scheme dispatch and INTERFACE CONTRACT in
-# CLAUDE.md: vllm_watermark.synthid.core.SynthIDConfig,
+# Phase 2 interface: vllm_watermark.synthid.core.SynthIDConfig,
 # vllm_watermark.synthid.detector.{score_token_ids_mean,
 # score_token_ids_weighted_mean, DEFAULT_Z_THRESHOLD}.
 try:
