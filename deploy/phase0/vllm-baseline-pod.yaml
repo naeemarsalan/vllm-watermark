@@ -1,0 +1,157 @@
+# Phase 0 baseline: plain `vllm serve` on the GPU node, no watermark plugin.
+#
+# --- Image provenance (EXECUTED, 2026-08-08) ---------------------------
+# Tag:  vllm/vllm-openai:v0.18.0  (exists on Docker Hub; verified via
+#   `curl -s https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/v0.18.0`
+#   -> HTTP 200, tag_status "active", last_pushed 2026-03-20T21:54:48Z)
+# Digests returned by that same lookup:
+#   manifest-list (multi-arch index) digest, pinned below:
+#     sha256:c32358ebfc115d56ade2acfdbcd00df5b115417dbd6006547c88f07e2b39de06
+#   per-arch image digests (informational -- pulling the manifest-list
+#   digest above auto-selects the matching arch, same as pulling the tag):
+#     amd64: sha256:96c7e88811a07030f27bc44cd71b9007258a15f130cfec2bb4ab057512238b05
+#     arm64: sha256:be723f3fa62508d6be28295d86de4aec9791e275474b82ed4697479242948e4d
+#   (the GPU node is amd64 -- confirmed via `oc get node <gpu-node> -o
+#   json | jq .metadata.labels`, kubernetes.io/arch=amd64 -- so the
+#   manifest-list digest resolves to the amd64 image there.)
+#
+# --- Entrypoint convention (EXECUTED, 2026-08-08) -----------------------
+# `skopeo inspect --config docker://vllm/vllm-openai@sha256:96c7e88...05`
+# -> Entrypoint: ["vllm", "serve"], Cmd: null, WorkingDir: /vllm-workspace,
+#    User: (unset, i.e. root; base is Ubuntu 22.04).
+# So the image's own ENTRYPOINT already is `vllm serve`; this pod does NOT
+# set `command:` and instead relies on `args:` being appended to that
+# entrypoint (i.e. args below run as `vllm serve <args...>`).
+#
+# --- Model vocab_size (EXECUTED, 2026-08-08) -----------------------------
+# `curl https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/raw/main/config.json`
+# -> vocab_size: 151936, max_position_embeddings: 32768, model_type: qwen2.
+# (--max-model-len 4096 below is well within the model's 32768-token
+# position-embedding ceiling.)
+#
+# --- Node placement (EXECUTED read-only checks, 2026-08-08) -------------
+# `scripts/create-gpu-machineset.sh` clones the cluster's non-GPU worker
+# MachineSet, sets instanceType=g5.xlarge, and adds the Machine-template
+# label `node-role.kubernetes.io/gpu: ""` -- but that label lands on the
+# Machine object's template, NOT on the Node object (the MachineSet's
+# `spec.template.spec.metadata.labels`, i.e. the field that *would*
+# propagate to Node.metadata.labels, is unset/null). Confirmed against the
+# live cluster:
+#   `oc -n openshift-machine-api get machineset ocp-ai-p9j4n-gpu-us-east-1a
+#    -o json | jq '.spec.template.spec.taints, .spec.template.spec.metadata.labels'`
+#   -> taints: null, nodeLabels (spec.metadata.labels): null
+#   `oc get node ip-10-0-5-194.ec2.internal -o json | jq '.spec.taints,
+#    .metadata.labels'`
+#   -> taints: null; labels do NOT include node-role.kubernetes.io/gpu,
+#      but DO include nvidia.com/gpu.present=true,
+#      node.kubernetes.io/instance-type=g5.xlarge (set by the NVIDIA GPU
+#      Operator's node-feature-discovery / gpu-feature-discovery, which is
+#      installed per gpu/nfd-instance.yaml + gpu/nvidia-gpu-operator.yaml).
+# CONCLUSION: the GPU MachineSet template sets NO taint -- so this pod
+# needs NO toleration (none is set below; add one only if a taint is
+# introduced later). nodeSelector below targets `nvidia.com/gpu.present:
+# "true"`, the label actually observed on the Node object (NOT
+# node-role.kubernetes.io/gpu, which -- despite being set on the Machine
+# template -- was not observed on the Node).
+#
+# --- Sizing (g5.xlarge = 4 vCPU / 16GiB host, A10G 24GiB) ----------------
+# Node `oc get node ... -o json .status.allocatable` -> cpu: 3500m,
+# memory: 15031468Ki (~14.65Gi), nvidia.com/gpu: 1. Requests/limits below
+# (cpu request 3, memory limit 12Gi + /dev/shm 2Gi = 14Gi worst case) fit
+# under that allocatable but leave only ~0.65Gi headroom for other
+# node-local system pods (device plugin, dcgm-exporter, etc.) -- flagged
+# in deploy/phase0/README.md as a thing to watch, not resolved here.
+#
+# --- SCC (no elevation requested) ---------------------------------------
+# No privileged/hostPath/extra-capabilities use; expected to run under the
+# cluster's default `restricted-v2` SCC (confirmed present: `oc get scc`).
+# See deploy/phase0/README.md "SCC" section for the one open risk (image
+# runs as root with no USER set -- arbitrary-UID compatibility unverified
+# since we cannot start the pod from this read-only task).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-baseline
+  namespace: watermark
+  labels:
+    app: vllm
+    variant: baseline
+spec:
+  # The Service named "vllm" makes k8s inject VLLM_PORT=tcp://... as a legacy
+  # service-link env var; vLLM reads VLLM_PORT itself and crashes (EXECUTED,
+  # see EXPERIMENTS.md 2026-08-08). Disable service links everywhere.
+  enableServiceLinks: false
+  # Only one of {vllm-baseline, vllm-watermark} can be Running at a time
+  # on this cluster: the GPU node has exactly nvidia.com/gpu: 1 allocatable
+  # (single A10G), and both pods request nvidia.com/gpu: 1 in limits (see
+  # vllm-watermark-pod.yaml). The other pod will sit Pending until this
+  # one is deleted. This is why a single Service (vllm-service.yaml)
+  # selecting the shared `app: vllm` label is correct and unambiguous --
+  # see that file's comments.
+  restartPolicy: Never
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+  # No tolerations: the GPU MachineSet template sets no taint (see header
+  # comment above) and none was observed on the live GPU node either.
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai@sha256:c32358ebfc115d56ade2acfdbcd00df5b115417dbd6006547c88f07e2b39de06 # tag: v0.18.0
+      args:
+        - "Qwen/Qwen2.5-0.5B-Instruct"
+        - "--max-model-len"
+        - "4096"
+        - "--gpu-memory-utilization"
+        - "0.90"
+      ports:
+        - name: http
+          containerPort: 8000
+      env:
+        - name: HF_HOME
+          value: /models-cache
+        # restricted-v2 SCC runs the container as an arbitrary UID; the image's
+        # default $HOME (/root) is not writable then. vLLM/triton/inductor all
+        # write caches under $HOME — point everything at the emptyDir.
+        - name: HOME
+          value: /models-cache
+        - name: XDG_CACHE_HOME
+          value: /models-cache/.cache
+        - name: XDG_CONFIG_HOME
+          value: /models-cache/.config
+      resources:
+        requests:
+          cpu: "3"
+          memory: 10Gi
+        limits:
+          memory: 12Gi
+          nvidia.com/gpu: "1"
+      volumeMounts:
+        - name: models-cache
+          mountPath: /models-cache
+        - name: dshm
+          mountPath: /dev/shm
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        failureThreshold: 60
+      livenessProbe:
+        # Looser than readiness: once Ready, only kill the pod if /health
+        # has been failing for a while (model load already succeeded by
+        # this point, so failures here indicate a real hang/crash, not
+        # normal cold-start weight loading -- readinessProbe covers that).
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        failureThreshold: 5
+  volumes:
+    - name: models-cache
+      emptyDir:
+        sizeLimit: 20Gi
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi

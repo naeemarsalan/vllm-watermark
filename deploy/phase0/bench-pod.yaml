@@ -1,0 +1,37 @@
+# Long-lived in-cluster pod used to run benchmarks/*.py against the
+# `vllm` Service without exposing vLLM outside the cluster (Route/
+# port-forward not needed -- see deploy/phase0/README.md "Benchmark
+# execution" for why in-cluster is preferred over port-forward here).
+#
+# No GPU and deliberately no nodeSelector: this should schedule on any
+# regular worker, NOT the GPU node (which is already tight on CPU/memory
+# headroom once vllm-baseline/vllm-watermark is running -- see that pod's
+# sizing comment). Default scheduler placement is fine.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bench
+  namespace: watermark
+  labels:
+    app: bench
+spec:
+  # The Service named "vllm" makes k8s inject VLLM_PORT=tcp://... as a legacy
+  # service-link env var; vLLM reads VLLM_PORT itself and crashes (EXECUTED,
+  # see EXPERIMENTS.md 2026-08-08). Disable service links everywhere.
+  enableServiceLinks: false
+  restartPolicy: Never
+  containers:
+    - name: bench
+      image: python:3.12-slim
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        # Not specified by the task brief (which only gave requests); added
+        # as a light safety cap so a runaway benchmark script can't starve
+        # neighboring pods on a shared regular worker. Raise if a
+        # benchmark run needs more (e.g. large corpus generation).
+        limits:
+          cpu: "1"
+          memory: 1Gi

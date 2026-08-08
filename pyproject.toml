@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-watermark"
+version = "0.1.0.dev0"
+description = "Decode-time text watermarking (KGW, SynthID-Text) for vLLM"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
+dependencies = [
+    "torch>=2.1",
+]
+
+[project.optional-dependencies]
+# Needed for kgw.detector.detect_text's tokenizer argument and for the
+# `detect` CLI command's --model-tokenizer loading; not required by the
+# pure kgw.core / kgw.detector token-id APIs.
+text = ["transformers>=4.40"]
+# Alias of `text` (same package set) matching the Task B brief's naming
+# ("extras: detector = [transformers]") -- kept as a separate extra rather
+# than renaming `text` so neither task's expected install command
+# (`pip install ".[text]"` / `pip install ".[detector]"`) breaks.
+detector = ["transformers>=4.40"]
+test = ["pytest"]
+
+# Entry point vLLM's plugin loader scans at engine init (all installed
+# packages exposing this exact group name). Verified against the actual
+# v0.18.0 tagged source, not memory:
+#   vllm/v1/sample/logits_processor/__init__.py, line 47:
+#     LOGITSPROCS_GROUP = "vllm.logits_processors"
+# FQCN loading format is "<module path>:<ClassName>" (colon separator, NOT
+# a dot before the class name) -- verified from the same file's
+# _load_logitsprocs_by_fqcns(), which does
+# `module_path, qualname = logitproc.split(":")` (~line 128). This is the
+# same format `--logits-processors` and `LLM(logits_processors=[...])`
+# expect for FQCN strings (vllm/engine/arg_utils.py:749 confirms the CLI
+# flag itself is hyphenated `--logits-processors`, not the underscored
+# `--logits_processors` shown in vLLM's own docs prose -- see
+# docs/api-notes-vllm-v0.18.0.md for the discrepancy). Full citations:
+# docs/api-notes-vllm-v0.18.0.md.
+[project.entry-points."vllm.logits_processors"]
+kgw = "vllm_watermark.kgw.processor:KGWLogitsProcessor"
+
+[tool.setuptools.packages.find]
+where = ["src"]

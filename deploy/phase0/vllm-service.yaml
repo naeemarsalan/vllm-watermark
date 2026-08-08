@@ -1,0 +1,39 @@
+# Single Service named `vllm`, selecting the label `app: vllm` shared by
+# BOTH vllm-baseline-pod.yaml and vllm-watermark-pod.yaml.
+#
+# This is intentional, not an oversight: the GPU node has exactly
+# nvidia.com/gpu: 1 allocatable (one A10G) and both pods request
+# nvidia.com/gpu: 1 in their limits, so at most one of {vllm-baseline,
+# vllm-watermark} can ever be Running/Ready at the same time -- the other
+# sits Pending (insufficient nvidia.com/gpu) until the first is deleted.
+# A Service selecting the pod-specific label (`variant: baseline` /
+# `variant: watermark`) would need to be swapped every time you switch
+# pods; selecting the shared `app: vllm` label instead means the same
+# Service DNS name (`vllm.watermark.svc.cluster.local`, or just `vllm`
+# from inside the `watermark` namespace) always routes to whichever of
+# the two pods is currently deployed and Ready -- exactly what
+# benchmarks/*.py needs for an apples-to-apples baseline-vs-watermark
+# comparison (Phase 0 vs Phase 1 in docs/implementation.md) without
+# editing the benchmark scripts' target URL between runs.
+#
+# Caution for the orchestrator: if both pods are ever made schedulable at
+# once (e.g. a second GPU is added later, or resources are loosened),
+# this selector would load-balance across both indiscriminately, which
+# is almost certainly not what you want for a controlled A/B comparison --
+# revisit the selector (e.g. split into two Services, or add a
+# `variant: baseline`/`variant: watermark` selector) before that changes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: watermark
+  labels:
+    app: vllm
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

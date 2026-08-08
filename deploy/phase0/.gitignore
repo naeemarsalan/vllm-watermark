@@ -1,0 +1,4 @@
+# A filled-in secret (real hex key material) must never enter git history.
+# See secret-template.yaml -- copy it to secret.yaml locally, fill in the
+# real value there, apply it, and let this entry keep it out of git.
+secret.yaml

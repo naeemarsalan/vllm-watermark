@@ -1,0 +1,215 @@
+# Phase 1: same base image/model/sizing as vllm-baseline-pod.yaml, plus
+# the KGW watermark plugin (src/vllm_watermark, Task B) wired in via
+# `--logits-processors vllm_watermark.kgw.processor:KGWLogitsProcessor`.
+#
+# --- Wheel-injection design (why this shape, not something simpler) -----
+# The package is pure-Python with zero compiled extensions (only runtime
+# dependency: torch, already present in the vllm-openai image) -- so a
+# pure-Python wheel built with ANY Python 3.11+/3.14 interpreter installs
+# and imports correctly regardless of the target image's exact Python
+# minor version (no ABI tag to match). That fact is what makes the
+# approach below viable without needing to know the vllm-openai image's
+# Python version in advance:
+#
+#   1. This pod starts and blocks in a wait loop (see `command` below)
+#      until a sentinel file /plugin/ready appears -- it does NOT try to
+#      pip-install anything from a registry (none exists for this
+#      not-yet-published package) or reach outside the cluster.
+#   2. The orchestrator builds the wheel locally (see build-wheel.sh) and
+#      copies it in with `oc cp`, then creates the sentinel with
+#      `oc exec ... touch /plugin/ready` -- see README.md "Watermark pod
+#      wheel-injection sequence" for the exact ordered commands.
+#   3. Once /plugin/ready exists, the container installs the wheel with
+#      `pip install --no-deps --target /plugin-site` (pip ships in the
+#      vllm-openai image; --no-deps is required and safe here: the only
+#      runtime dependency, torch, is already installed in the base image;
+#      installing it again into /plugin-site would be wasteful at best
+#      and could shadow/conflict with the base image's CUDA-matched torch
+#      build at worst), then sets PYTHONPATH=/plugin-site and execs the
+#      normal `vllm serve` command.
+#
+# This was considered against a ConfigMap-of-the-whole-package (rejected:
+# ConfigMaps have a 1MiB size ceiling and packaging a whole tree into one
+# awkwardly, vs. `oc cp` handling an arbitrary-size file naturally) and an
+# initContainer with a hardcoded python minor version (rejected: the
+# target image's Python version was not independently confirmed here --
+# skopeo image-config inspection does not reveal the interpreter's minor
+# version without executing the image -- and is moot anyway since a
+# pure-Python wheel doesn't need it to match).
+#
+# --- Two emptyDirs ---------------------------------------------------
+#   /plugin       -- drop zone for the wheel + the `ready` sentinel file
+#                    (oc cp target).
+#   /plugin-site  -- pip install --target destination (kept separate from
+#                    /plugin so a stray `vllm_watermark-*.whl` glob match
+#                    inside /plugin-site can never happen).
+#
+# --- Everything else (image digest, entrypoint, node placement, sizing,
+# SCC posture) is identical to vllm-baseline-pod.yaml -- see that file's
+# header comment for the full evidence trail; not repeated here.
+#
+# --- vllm_xargs / --logits-processors flag notes -------------------------
+# `--logits-processors` (hyphenated, not `--logits_processors`) and the
+# FQCN colon-separator format (`module.path:ClassName`) are both verified
+# against the actual v0.18.0 tagged vLLM source, not vLLM's own docs prose
+# (which has both of those wrong) -- see
+# docs/api-notes-vllm-v0.18.0.md §3 (already verified by Task B; not
+# re-verified independently here, just reused).
+# `vllm_xargs` (the REST field carrying `watermark`/`watermark_key_id` to
+# KGWLogitsProcessor -- see src/vllm_watermark/kgw/processor.py) needs NO
+# separate enable flag in v0.18.0: `vllm_xargs` is an unconditional
+# Pydantic field on both ChatCompletionRequest and CompletionRequest (no
+# gating flag was found anywhere in vllm/engine/arg_utils.py during that
+# same source review) -- see docs/api-notes-vllm-v0.18.0.md §7. (Also not
+# re-verified independently here; reused from Task B's already-EXECUTED-
+# equivalent source review, itself STATIC since it's a source read, not a
+# vLLM run.)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-watermark
+  namespace: watermark
+  labels:
+    app: vllm
+    variant: watermark
+spec:
+  # The Service named "vllm" makes k8s inject VLLM_PORT=tcp://... as a legacy
+  # service-link env var; vLLM reads VLLM_PORT itself and crashes (EXECUTED,
+  # see EXPERIMENTS.md 2026-08-08). Disable service links everywhere.
+  enableServiceLinks: false
+  # See vllm-baseline-pod.yaml: only one of {vllm-baseline, vllm-watermark}
+  # can be Running at a time (single nvidia.com/gpu on the node) -- delete
+  # vllm-baseline before creating this pod, or vice versa.
+  restartPolicy: Never
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+  # No tolerations: the GPU MachineSet template sets no taint (see
+  # vllm-baseline-pod.yaml header comment for the evidence trail).
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai@sha256:c32358ebfc115d56ade2acfdbcd00df5b115417dbd6006547c88f07e2b39de06 # tag: v0.18.0
+      # Overrides the image's own ENTRYPOINT (["vllm", "serve"]) entirely
+      # (rather than just supplying `args:` like vllm-baseline-pod.yaml
+      # does) so we can wait-then-install-then-exec inside a shell. The
+      # final `exec vllm serve ...` line reproduces the same `vllm serve`
+      # invocation the baseline pod gets via `args:`, plus
+      # `--logits-processors`.
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          echo "[vllm-watermark] waiting for /plugin/ready (orchestrator: oc cp the wheel, then oc exec touch /plugin/ready) ..."
+          until [ -f /plugin/ready ]; do
+            sleep 3
+          done
+          WHEEL=$(ls /plugin/vllm_watermark-*.whl 2>/dev/null | head -n1)
+          if [ -z "$WHEEL" ]; then
+            echo "[vllm-watermark] ERROR: /plugin/ready exists but no /plugin/vllm_watermark-*.whl was found" >&2
+            exit 1
+          fi
+          echo "[vllm-watermark] installing $WHEEL --no-deps --target /plugin-site ..."
+          if command -v pip >/dev/null 2>&1; then
+            pip install --no-deps --target /plugin-site "$WHEEL"
+          elif python3 -m pip --version >/dev/null 2>&1; then
+            python3 -m pip install --no-deps --target /plugin-site "$WHEEL"
+          elif command -v uv >/dev/null 2>&1; then
+            uv pip install --no-deps --target /plugin-site "$WHEEL"
+          else
+            echo "[vllm-watermark] ERROR: none of pip / python3 -m pip / uv are available in this image to install the wheel" >&2
+            exit 1
+          fi
+          export PYTHONPATH="/plugin-site${PYTHONPATH:+:$PYTHONPATH}"
+          echo "[vllm-watermark] plugin installed, starting vllm serve ..."
+          exec vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+            --max-model-len 4096 \
+            --gpu-memory-utilization 0.90 \
+            --logits-processors vllm_watermark.kgw.processor:KGWLogitsProcessor
+      ports:
+        - name: http
+          containerPort: 8000
+      env:
+        - name: HF_HOME
+          value: /models-cache
+        # restricted-v2 SCC runs the container as an arbitrary UID; the image's
+        # default $HOME (/root) is not writable then. vLLM/triton/inductor all
+        # write caches under $HOME — point everything at the emptyDir.
+        - name: HOME
+          value: /models-cache
+        - name: XDG_CACHE_HOME
+          value: /models-cache/.cache
+        - name: XDG_CONFIG_HOME
+          value: /models-cache/.config
+        # Every request is watermarked by default without needing a
+        # per-request vllm_xargs -- this pod's whole purpose is serving
+        # watermarked output (default is "off" if unset -- see
+        # src/vllm_watermark/kgw/processor.py). Individual requests can
+        # still override with vllm_xargs {"watermark": "off"} for the
+        # negative-test protocol in docs/implementation.md Phase 1.
+        - name: VLLM_WATERMARK_DEFAULT
+          value: "on"
+        - name: WATERMARK_KEY
+          valueFrom:
+            secretKeyRef:
+              name: watermark-key
+              key: WATERMARK_KEY
+        - name: WATERMARK_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: watermark-key
+              key: WATERMARK_KEY_ID
+              optional: true
+      resources:
+        requests:
+          cpu: "3"
+          memory: 10Gi
+        limits:
+          memory: 12Gi
+          nvidia.com/gpu: "1"
+      volumeMounts:
+        - name: models-cache
+          mountPath: /models-cache
+        - name: dshm
+          mountPath: /dev/shm
+        - name: plugin
+          mountPath: /plugin
+        - name: plugin-site
+          mountPath: /plugin-site
+      # NOT startupProbe/readinessProbe-gated on the wait loop finishing
+      # quickly: initialDelaySeconds=60 assumes model loading dominates,
+      # same as the baseline pod, but this pod ALSO waits (indefinitely,
+      # until the orchestrator's oc cp+touch) before model loading even
+      # starts. If the orchestrator does the wheel-injection sequence
+      # promptly after pod creation this is a non-issue in practice; if
+      # not, the pod will simply stay NotReady (never crash-loop, since
+      # the wait loop doesn't exit) until the sequence runs -- see
+      # README.md for the exact ordered commands.
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        failureThreshold: 60
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        # 300s not 120s: this pod blocks in the wait-for-wheel loop before model
+        # load even starts; a 120s initial delay + 5x30s failures would kill the
+        # container at ~270s if the orchestrator is slow with the oc cp+touch.
+        initialDelaySeconds: 300
+        periodSeconds: 30
+        failureThreshold: 5
+  volumes:
+    - name: models-cache
+      emptyDir:
+        sizeLimit: 20Gi
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi
+    - name: plugin
+      emptyDir: {}
+    - name: plugin-site
+      emptyDir: {}

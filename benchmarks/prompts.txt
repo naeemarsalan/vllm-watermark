@@ -1,0 +1,120 @@
+Explain how vaccines train the immune system to recognize pathogens it has never encountered before.
+Explain why the night sky is dark even though the universe contains an enormous number of stars.
+Explain how compound interest can turn small, regular savings into significant wealth over decades.
+Explain the difference between weather and climate, and why one unusually cold winter doesn't disprove long-term warming.
+Explain how a criminal trial in a common-law system moves from arrest to verdict.
+Explain why some metals conduct electricity so much better than others.
+Explain how search engines decide which web pages to show first for a given query.
+Explain why yeast makes bread dough rise and how that process changes the texture of the final loaf.
+Explain how tectonic plates move and why their motion causes earthquakes along certain fault lines.
+Explain how astronomers can detect a black hole even though no light escapes it.
+Explain why antibiotic resistance spreads so quickly in hospital settings.
+Explain how a central bank raising interest rates is supposed to slow down inflation.
+Explain how noise-cancelling headphones use sound waves to cancel out other sound waves.
+Explain why jet lag tends to be worse when flying east than when flying west.
+Explain how photosynthesis converts sunlight into the chemical energy that powers nearly every food chain on Earth.
+Explain why the same joke can be hilarious in one culture and fall completely flat in another.
+Explain how encryption keeps a credit card number safe while it travels across the internet.
+Explain why muscles get sore a day or two after an unfamiliar workout rather than immediately.
+Explain how a recession gets officially declared and who actually makes that call.
+Explain why some languages assign grammatical gender to nouns and others don't.
+Explain why flu vaccines have to be redesigned nearly every year instead of once and for all.
+Explain why a full moon appears larger near the horizon than high overhead.
+Explain how a startup's valuation gets determined before it has any profit to show investors.
+Explain why some historians argue the fall of the Roman Empire was more of a slow transformation than a sudden collapse.
+Write a short story about a lighthouse keeper who discovers a message in a bottle that seems to be addressed to her specifically.
+Write a story about two rival food-truck chefs forced to share one truck during a citywide festival.
+Tell a story set in a small mountain town the week before its only bridge is scheduled for demolition.
+Write a story about an archivist who finds her own handwriting in a letter dated fifty years before she was born.
+Tell a story about a retired astronaut who takes a job teaching middle school science.
+Write a story about a family reunion where an old, unspoken argument finally comes to the surface.
+Write a story about a translator at a peace negotiation who begins to doubt the words she's being asked to render.
+Tell a story about a locksmith called to open a door that, according to the building's blueprints, does not exist.
+Write a story about the last night a small independent bookstore is open before it closes for good.
+Tell a story about two strangers stranded together at an airport during a blizzard that keeps getting worse.
+Write a story about a violin maker asked to repair an instrument with a strange and disputed history.
+Write a story about a lighthouse crew's final winter before their station gets fully automated.
+Tell a story about a chess player who slowly realizes their opponent, a ten-year-old, is quietly outmaneuvering them.
+Write a story about a courier who delivers a package to the same address every week without ever learning what's inside.
+Write a story about a farmer who unearths something unexpected while plowing a field that has been in the family for generations.
+Tell a story about a museum night guard who notices that one exhibit changes slightly every night.
+Write a story about a small-town newspaper editor covering what might be the paper's last big story before it folds.
+Write a story about a diver who finds a shipwreck that matches no vessel in any known registry.
+Tell a story about siblings cleaning out their childhood home the week it finally sells.
+Write a story about a substitute teacher who ends up staying an entire semester and getting pulled into a school's politics.
+Write a story about a beekeeper whose hives start behaving strangely right before a storm rolls in.
+Write a story about a night-shift radio host who starts getting calls from someone claiming to be phoning in from decades ago.
+Tell a story about a cartographer mapping a coastline that keeps not quite matching her measurements from the year before.
+Write a story about two neighbors who have never spoken, brought together when a shared garden fence collapses.
+Argue for or against the idea that college should be free for everyone who wants to attend.
+Make the case that cities should redesign their streets to prioritize pedestrians and cyclists over cars.
+Argue whether remote work has been, on balance, good or bad for how teams actually collaborate.
+Take a position on whether social media platforms should be required to verify their users' real identities.
+Argue for or against banning smartphones in classrooms for students under sixteen.
+Make the case for or against nuclear power as the primary tool for cutting carbon emissions this century.
+Argue whether professional athletes are paid fairly relative to teachers and nurses.
+Take a position on whether zoos still serve a legitimate purpose in the age of nature documentaries and conservation parks.
+Argue for or against a four-day work week becoming the standard across most industries.
+Make the case that tipping culture in restaurants should be abolished in favor of higher posted prices.
+Argue whether standardized testing is a fair way to measure a student's real potential.
+Take a position on whether it's ethical to keep large predators like tigers in captivity even for conservation breeding.
+Argue for or against requiring a year of national service, military or civilian, for young adults.
+Make the case that streaming services have made television better, or worse, than the old cable era.
+Argue whether cities should ban new fast-food drive-throughs to encourage healthier eating habits.
+Take a position on whether homework helps or hurts younger students' learning and wellbeing.
+Argue for or against letting companies monitor employees' productivity through software on their work computers.
+Make the case that professional sports leagues should, or shouldn't, allow advanced prosthetic technology.
+Argue whether inheritance taxes are a fair way to fund public services.
+Take a position on whether AI-generated art deserves the same copyright protection as human-made art.
+Argue for or against term limits for national legislators.
+Make the case that space exploration budgets are, or aren't, justified given the problems we still have on Earth.
+Argue whether it's better for a country to have many small political parties or two dominant ones.
+Take a position on whether plastic packaging bans do more good than harm once you account for the alternatives.
+Summarize what's generally understood about why the Titanic sank and which decisions made the disaster worse than it needed to be.
+Summarize the main causes and consequences of the fall of the Berlin Wall.
+Summarize how the printing press changed European society in the century after Gutenberg.
+Summarize the key ideas behind Charles Darwin's theory of evolution by natural selection.
+Summarize the main events and outcomes of the Cuban Missile Crisis.
+Summarize what scientists currently understand about how sleep affects memory consolidation.
+Summarize the causes of the 2008 global financial crisis in terms a non-economist could follow.
+Summarize the major phases of the French Revolution and how it eventually gave way to Napoleon.
+Summarize what is known about the construction of the Egyptian pyramids and the labor behind them.
+Summarize the main arguments for and against the theory that a large asteroid impact ended the age of dinosaurs.
+Summarize the historical origins and spread of the Silk Road trade routes.
+Summarize how the Manhattan Project developed the first nuclear weapons and the debates that followed.
+Summarize what's understood about the domestication of dogs from wolves.
+Summarize the key events of the American civil rights movement during the 1950s and 1960s.
+Summarize the causes and lasting effects of the Irish potato famine.
+Summarize how the internet evolved from a small military research network into a global communications system.
+Summarize the main scientific theories about how the Moon was formed.
+Summarize the political and economic factors that led to the collapse of the Soviet Union.
+Summarize what historians know about the life and reign of Cleopatra.
+Summarize the major milestones in the history of powered flight, from the Wright brothers onward.
+Summarize the causes of the Industrial Revolution and why it began in Britain first.
+Summarize what is known about the extinction of the Neanderthals and their relationship to modern humans.
+Summarize the events leading up to and following the assassination of Archduke Franz Ferdinand.
+Summarize how vaccination campaigns eventually led to the global eradication of smallpox.
+Explain how to plan a two-week backpacking trip through an unfamiliar country on a tight budget.
+Walk through how to start a small vegetable garden in a backyard with average, unimproved soil.
+Explain how to prepare for a job interview for a role you're only moderately qualified for on paper.
+Walk through how to negotiate a lower price on a used car without alienating the seller.
+Explain how to train a nervous rescue dog to feel comfortable around new people.
+Walk through the steps of brewing a proper pot of coffee using a pour-over method at home.
+Explain how to set up a simple personal budget that actually survives contact with real life.
+Walk through how to prepare a house for an approaching hurricane when you only have a day's notice.
+Explain how to give honest, useful feedback to a coworker without damaging the relationship.
+Walk through how to plan a wedding on a modest budget without it feeling cut-rate.
+Explain how to teach a teenager to drive a manual transmission car for the first time.
+Walk through how to organize a garage that has become a dumping ground for years of clutter.
+Explain how to prepare a resume that survives an automated applicant-tracking system and still reads well to a human.
+Walk through the process of composting kitchen scraps in a small urban apartment.
+Explain how to plan a multi-course dinner party for eight people when you're not a professional cook.
+Walk through how to change a flat tire safely on the shoulder of a busy highway.
+Explain how to start learning a musical instrument as an adult with no prior training.
+Walk through how to prepare a child for their first day at a new school.
+Explain how to research and choose a reliable contractor for a home renovation.
+Walk through the basics of setting up a home network that reliably covers a whole house with weak spots.
+Explain how to train for a first half-marathon starting from a casual jogging habit.
+Walk through how to write a cover letter that doesn't just repeat the resume in prose form.
+Explain how to prune a mature apple tree so it stays healthy and productive.
+Walk through how to plan a road trip across several countries with unpredictable border crossings.

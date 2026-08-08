@@ -21,3 +21,7 @@ venv/
 models/
 *.safetensors
 *.gguf
+
+# Python build artifacts (wheel is reproducible via deploy/phase0/build-wheel.sh)
+build/
+dist/

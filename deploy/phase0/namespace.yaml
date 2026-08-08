@@ -1,0 +1,14 @@
+# Phase 0/1 namespace for the bare-pod vLLM spike (pre-RHOAI).
+#
+# NOTE (read-only cluster check, 2026-08-08): a namespace named `watermark`
+# already exists on the `ocp-ai` cluster (`oc get namespace watermark` ->
+# STATUS Active). `oc apply -f namespace.yaml` against an already-existing
+# namespace is a no-op / idempotent update, so this manifest is still safe
+# and correct to apply -- it is not expected to change anything on a
+# cluster where the namespace already exists.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: watermark
+  labels:
+    app.kubernetes.io/part-of: vllm-watermark
