@@ -24,14 +24,14 @@ Build `src/vllm_watermark/` as a pip-installable package:
 
 - A V1 `LogitsProcessor` subclass implementing KGW green-list biasing, ported from `transformers`' implementation (Apache-2.0). `is_argmax_invariant()` → `False`. Keyed hashing seeded from a secret **read from env/mounted Secret — never hardcoded, never logged**.
 - Entry point in group `vllm.logits_processors`; also loadable via `--logits-processors`.
-- Per-request control via `vllm_xargs` (e.g. `watermark: on/off`, `key_id`) with `validate_params()` rejecting malformed args.
+- Per-request control via `vllm_xargs` (e.g. `watermark: on/off`, `watermark_key_id`) with `validate_params()` rejecting malformed args.
 - A detector CLI/module using the same key(s) (port of `transformers` `WatermarkDetector` logic), independent of vLLM.
 
-Test protocol (all through the **OpenAI-compatible server**, not offline `LLM()`):
-- ≥100 watermarked and ≥100 unwatermarked generations at ~256 tokens, temperature 0.7, plus a ≥100-sample human-text corpus.
+Test protocol (all generated samples through the **OpenAI-compatible server**, not offline `LLM()`):
+- ≥100 watermarked and ≥100 unwatermarked generations at ~256 tokens, temperature 0.7, plus a separately sourced ≥100-sample human-text corpus.
 - Report z-score distributions, TPR at the z≥4 threshold, FPR on human corpus.
 - Throughput/latency vs Phase 0 baseline (same prompts, same settings).
-- Negative tests: temperature 0 (expect degraded signal — document it), structured-output request (expect composition per docs/technical.md §1 ordering), spec-decode flag (expect the documented startup error, verbatim).
+- Negative tests: temperature 0 (measure rather than assume; the recorded KGW run is an `EXECUTED` exception to the general degradation expectation in fact B18), structured-output request (expect composition per docs/technical.md §1 ordering), spec-decode flag (expect the documented startup error, verbatim).
 
 **Accept when:** clean statistical separation demonstrated end-to-end through `vllm serve` (KGW at 256 tokens should show z well above 4 for watermarked and ~0 for controls); overhead quantified; all results in `EXPERIMENTS.md` with commands; facts B-register updated (D1 → EXECUTED).
 
@@ -41,17 +41,16 @@ Test protocol (all through the **OpenAI-compatible server**, not offline `LLM()`
 - Detection: start with the untrained weighted-mean scorer; measure. Then decide whether Bayesian-detector training (~10k matched examples — generate them with the Phase 1 harness) is warranted; if trained, version the detector artifact with the exact generation config it matches.
 - Same test protocol as Phase 1; add a KGW-vs-SynthID comparison table (detectability at 200/256/512 tokens, quality spot-check, overhead).
 
-**Accept when:** SynthID generation+detection works through `vllm serve` with quantified reliability at the Code-relevant 200-token length; comparison table in `EXPERIMENTS.md`; D8 closed.
+**Accept when:** SynthID generation+detection works through `vllm serve` with quantified reliability at the Code's quoted 200-token threshold (`OJ-VERBATIM`, [quotes](quotes.md#cop-measure-1-1)); comparison table in `EXPERIMENTS.md`; D8 closed.
 
-## Phase 3 — Detection service + TrustyAI confirmation (closes D5)
+## Phase 3 — Detection service + current guardrails-path confirmation (addresses D5)
 
-- Wrap the detector in a service exposing:
-  1. the TrustyAI detectors contract: `POST /api/v1/text/contents` (verify the exact request/response schema against the RHOAI 3.4 guardrails docs and `trustyai-explainability/guardrails-detectors` before coding — do not assume field names);
-  2. a direct endpoint returning `{z_score, p_value, verdict, key_id, detector_version}` with a signed (e.g. cosign/JWS) result payload — the Code requires downloadable, digitally signed detection results for signatories.
-- Deploy the GuardrailsOrchestrator on the cluster; register the watermark detector; run detection through the orchestrator against Phase 1/2 outputs.
-- Zero-retention: the service must not store submitted content (Code requirement); log only hashes + verdicts.
+- The detector service exposes the historical FMS contract, `POST /api/v1/text/contents`, and a direct endpoint returning `{z_score, p_value, verdict, key_id, detector_version}` with an Ed25519-JWS-signed result. Both were exercised on OpenShift (`EXECUTED`, fact D5 and the [Phase 3 experiment](../EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half)). Signing is an engineering feature here, not a claimed legal requirement (`OPEN`).
+- The FMS Guardrails Orchestrator routed KGW and SynthID requests to the detector, and an upstream `nemoguardrails==0.23.0` custom output-rail action called it with fail-closed handling (`EXECUTED`, fact D5 and the [NeMo hardening transcript](../EXPERIMENTS.md#2026-08-08--nemo-poc-hardening-evidence-full-transcript-fresh-pod-pass)).
+- RHOAI 3.4 labels FMS Guardrails legacy and directs users to NeMo Guardrails (`OFFICIAL-SRC`, fact C11). The RHOAI-managed `NemoGuardrails` custom-resource path, shipped version, and retention behavior remain unverified (`OPEN`, facts C11/D5); carry that product integration into Phase 4 rather than treating either executed proof as a supported production architecture.
+- The detector is designed to avoid storing submitted content and its application logs contain hashes plus verdict metadata; the executed evidence is scoped to the detector logs inspected in Phase 3 (`STATIC` / `EXECUTED`, fact D5 and the [Phase 3 experiment](../EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half)). Whether this exact zero-retention design is a Code requirement remains `OPEN`.
 
-**Accept when:** the orchestrator routes a detection request to our detector and returns a correct verdict for known-watermarked and known-clean text — demonstrated end-to-end on the cluster, transcripts in `EXPERIMENTS.md`.
+**Acceptance status:** the executable half is met: FMS and upstream NeMo paths returned the expected known-watermarked and clean verdicts with raw transcripts (`EXECUTED`, fact D5). The RHOAI-managed NeMo path remains `OPEN` and moves forward with Phase 4; this phase does not establish Red Hat supportability.
 
 ## Phase 4 — RHOAI deployment pattern (closes C8, informs D6)
 
@@ -67,7 +66,7 @@ Test protocol (all through the **OpenAI-compatible server**, not offline `LLM()`
 - GPU overhead at realistic batch sizes (closes D2); tensor-parallel correctness if a multi-GPU node is available (D3 — identical key/seed across ranks).
 - Robustness: paraphrase and translation attacks on our own outputs (quantify; expect the literature numbers — see technical.md §3.3).
 - Key management design doc (D4): generation, storage (Vault/Secrets), rotation, per-app `key_id` scoping, compromise runbook.
-- Compliance mapping doc: each Code of Practice measure → what this implementation does (Measure 1.1/1.1.2, Commitment 2 access rules, Measure 3.4 interoperability by 2027-02-02, Measure 4.2 documented internal testing — the `EXPERIMENTS.md` log *is* that documentation; keep it audit-grade).
+- Compliance mapping doc: map the exact quoted Code language and sources in [`docs/quotes.md`](quotes.md) to what this implementation does (`OJ-VERBATIM` for the source text; implementation status tagged separately). The `EXPERIMENTS.md` log may contribute to required documentation only if it meets the applicable requirements; keep it audit-grade.
 
 **Accept when:** overhead and robustness tables published; key-management and compliance-mapping docs reviewed.
 

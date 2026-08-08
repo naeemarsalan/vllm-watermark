@@ -41,7 +41,7 @@ vLLM's V1 engine exposes a documented plugin API for custom logits processors �
 <a id="what-changes-where"></a>
 ### What changes where: nothing on the model, everything in serving config
 
-The model weights, files, and checkpoints stay untouched — no fine-tuning, no conversion. Decode-time watermarking hooks the serving layer after the model computes logits and before the sampler picks a token, which is why it works identically for any model vLLM serves. The integration surface is three pieces:
+The model weights, files, and checkpoints stay untouched — no fine-tuning, no conversion. Decode-time watermarking hooks the serving layer after the model computes logits and before the sampler picks a token, so the extension surface is not tied to one model architecture. That is a `STATIC` compatibility inference, not evidence that watermark correctness, quality, and detectability are identical across every model; those require per-model execution. The integration surface is three pieces:
 
 **1. A package in the runtime image (the only real "change").** The watermark logits processor is a small pip-installable Python package that must be importable inside the vLLM container. On OpenShift AI that means a custom runtime image: the Red Hat vLLM base image + `pip install` of the plugin (see [openshift-ai.md](openshift-ai.md) — this is the piece with the open supportability question, D6).
 
