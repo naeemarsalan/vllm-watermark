@@ -1,0 +1,8 @@
+SYNTHID STATUS: generation_ok
+SYNTHID TEXT:  not a matter of "the history of the Church" and it is "a matter of history." The history of the Church is a matter of history.
+
+The history of the Roman Empire is a matter of history.
+
+The history of the Roman Empire is a matter of history.
+
+gen time 11.19s, total 13.5s

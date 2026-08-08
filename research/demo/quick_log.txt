@@ -1,0 +1,11 @@
+loaded gpt2 in 11.3s
+WATERMARKED TEXT:  that when it was founded, Rome was the most populous of the Roman Empire states and was the wealthiest of the Roman Empire states and, in fact, was the most populous of the Roman Empire states but it also had an economy that was much more advanced than that of Rome and was much more advanced than
+wm gen time 14.90s
+UNWATERMARKED TEXT:  that when Augustus was already the Emperor of the Empire, he appointed a new emperor and appointed a new commander. This new emperor was, in fact, Augustus Caesar. In fact, in his name he would be known as Augustus Caesar.
+
+This new emperor was to be called Augustus Caesar Augustus Caesar
+nowm gen time 7.77s
+DETECT wm: {'prediction': [True], 'p_value': [5.4492022005803165e-09], 'z_score': [5.366563145999495], 'num_tokens_scored': [60.0], 'num_green_tokens': [33.0], 'green_fraction': [0.55]}
+DETECT nowm: {'prediction': [False], 'p_value': [0.3004592929865577], 'z_score': [0.8944271909999159], 'num_tokens_scored': [60.0], 'num_green_tokens': [18.0], 'green_fraction': [0.3]}
+DETECT human: {'prediction': [False], 'p_value': [0.5835895709299469], 'z_score': [-0.5360562674188973], 'num_tokens_scored': [29.0], 'num_green_tokens': [6.0], 'green_fraction': [0.20689655172413793]}
+TOTAL TIME 34.6s

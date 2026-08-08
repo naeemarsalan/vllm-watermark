@@ -1,0 +1,23 @@
+# Credentials and generated OpenShift installation assets.
+# `aws` holds live sandbox credentials; `cluster/` holds installer state,
+# kubeconfig, and kubeadmin password. These must NEVER enter git history.
+aws
+cluster/
+*.log
+*.pem
+*.key
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Model/data caches
+.cache/
+models/
+*.safetensors
+*.gguf
