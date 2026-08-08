@@ -1,0 +1,38 @@
+# Repo-root .dockerignore for detector/Dockerfile (Task C3).
+#
+# IMPORTANT -- what this file does and does NOT protect, verified by
+# searching the OpenShift docs source (openshift/openshift-docs,
+# enterprise-4.20 branch, 2026-08-08: zero hits for "dockerignore" anywhere
+# in that repo):
+#
+#   * Standard `docker build` / `podman build -f detector/Dockerfile .` run
+#     from the repo root DOES respect this file (excludes these paths from
+#     the build context entirely) -- useful for local testing of the image.
+#   * Buildah, which executes the actual image build inside an OpenShift
+#     BuildConfig's build pod, also honors a `.dockerignore` at the context
+#     root for its own COPY/ADD instructions.
+#   * What is NOT confirmed anywhere in the fetched OpenShift 4.20 docs is
+#     whether `oc start-build --from-dir=DIR` filters DIR by this file
+#     *before* archiving and uploading it to the build -- the docs describe
+#     `--from-dir` purely as "contents are archived and sent as a binary
+#     stream" with no mention of dockerignore-aware filtering at that step.
+#
+# Because `cluster/` holds LIVE, gitignored OpenShift credentials (kubeconfig,
+# kubeadmin password, installer TLS material -- see repo-root .gitignore and
+# AGENTS.md #3, "never commit, print, echo, or paste their contents"), this
+# repo's runbook (deploy/phase3/README.md, "Build context safety") does NOT
+# rely on this file alone to keep `cluster/` out of a binary build upload --
+# it stages a directory containing only `dist/` + `detector/` and runs
+# `oc start-build --from-dir=` against THAT, so the live credentials never
+# leave the workstation regardless of how `oc` handles this file. This
+# .dockerignore is kept anyway as defense in depth for local
+# docker/podman builds and for the in-pod Buildah COPY step.
+cluster/
+research/
+benchmarks/data/
+benchmarks/results/
+.git/
+gpu/
+*.pem
+*.key
+aws

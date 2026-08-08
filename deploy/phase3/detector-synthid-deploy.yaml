@@ -1,0 +1,214 @@
+# SynthID-scheme twin of detector-deploy.yaml (same image, same code).
+#
+# WHY THIS FILE EXISTS (EXECUTED evidence, 2026-08-08): the RHOAI-3.4-matched
+# orchestrator image (quay.io/opendatahub/ta-guardrails-orchestrator:odh-3.4.2.git)
+# self-reports fms-guardrails-orchestr8 0.16.0 on /health:8034 and SILENTLY
+# IGNORES the 0.18.3+ `path_prefix` detector-config field (rollout succeeds,
+# routing unchanged). With one shared detector Service, per-request scheme
+# selection then depends entirely on the CLIENT passing detector_params.scheme
+# -- a misconfiguration trap (a caller forgetting the param gets the env
+# default scheme silently). This second Deployment pins
+# WATERMARK_DETECTOR_SCHEME=synthid at the SERVER side; the orchestrator
+# registers watermark-synthid -> hostname detector-synthid. detector_params
+# overrides still work on both deployments.
+#
+# Task C3 -- Deployment + Service for the watermark detector service, running
+# the image built by detector-build.yaml. Namespace `watermark` (reused, see
+# that file's header comment). CPU-only (tokenizer + torch CPU scoring) --
+# no GPU node / nodeSelector needed, unlike deploy/phase0's vLLM pods.
+#
+# Image-consumption pattern -- verified against OpenShift 4.20 docs (fetched
+# 2026-08-08, `openshift/openshift-docs` branch `enterprise-4.20`; docs.redhat.com
+# itself returned HTTP 403 to every direct fetch from this environment, so
+# the GitHub source of the same generated pages was used instead):
+#
+#   modules/images-triggering-updates-imagestream-changes-kubernetes-about.adoc:
+#   "Kubernetes resources do not have fields for triggering, unlike
+#   deployment and build configurations ... Instead, you can use annotations
+#   in {product-title} to request triggering." -- confirms this is CURRENTLY
+#   the documented mechanism for a plain `apps/v1` Deployment (as opposed to
+#   the OpenShift-specific `apps.openshift.io/v1 DeploymentConfig` kind,
+#   which has a native `spec.triggers` field this task deliberately does not
+#   use) to pick up ImageStream changes, superseding the task brief's other
+#   candidate (`alpha.image.policy.openshift.io/resolve-names`, an unrelated,
+#   older mechanism for resolving a *pull spec string* to a digest at
+#   admission time -- not what's needed here, since the goal is redeploying
+#   on a NEW build, not resolving an existing tag once).
+#   modules/images-triggering-updates-imagestream-changes-kubernetes-cli.adoc
+#   gives the exact annotation shape reproduced below (verbatim field names:
+#   `from.kind`, `from.name`, `fieldPath`; `from.namespace` and `paused` are
+#   documented optional and omitted here since the ImageStreamTag is in the
+#   same namespace as the Deployment) and the equivalent
+#   `oc set triggers deploy/example --from-image=example:latest -c web` CLI
+#   form, noted in the README as an alternative to hand-writing the
+#   annotation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: detector-synthid
+  namespace: watermark
+  labels:
+    app.kubernetes.io/part-of: vllm-watermark
+    app.kubernetes.io/component: detector-synthid
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: detector-synthid
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: detector-synthid
+  namespace: watermark
+  labels:
+    app.kubernetes.io/part-of: vllm-watermark
+    app.kubernetes.io/component: detector-synthid
+  annotations:
+    # See header comment. `detector` here is the ImageStreamTag created by
+    # detector-build.yaml's `output.to` (kind: ImageStreamTag, name:
+    # detector:latest); `container.name == "detector"` below is what
+    # `fieldPath` walks to.
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"detector:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"detector\")].image","paused":false}]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: detector-synthid
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: detector-synthid
+    spec:
+      # Repo convention (see deploy/phase0/vllm-baseline-pod.yaml's own
+      # comment): disable legacy Kubernetes service-link env var injection.
+      # No specific collision is known for THIS service the way vLLM's own
+      # `VLLM_PORT` read caused one (EXPERIMENTS.md, 2026-08-08) -- this is
+      # blanket hygiene against the Service named `detector` injecting a
+      # `DETECTOR_*`-prefixed env var that happens to collide with something
+      # a future dependency reads, not a proven necessity for the code as it
+      # stands today.
+      enableServiceLinks: false
+      containers:
+        - name: detector-synthid
+          # Placeholder pull spec -- OVERWRITTEN by the image trigger
+          # annotation above the first time detector-build.yaml's BuildConfig
+          # completes a build and updates the `detector:latest`
+          # ImageStreamTag. Written as the in-cluster internal registry
+          # pull spec (the same pattern `oc set triggers`'s own example uses
+          # for its initial container image) so `oc apply` succeeds even
+          # before any build has run (`imagePullPolicy: IfNotPresent` below
+          # then means the pod stays Pending/ImagePullBackOff, not
+          # crash-looping, until the trigger fires -- see README ordering).
+          image: image-registry.openshift-image-registry.svc:5000/watermark/detector:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            # Existing Secret (deploy/phase0/secret-template.yaml ->
+            # secret.yaml, gitignored) -- exact key names verified by
+            # reading src/vllm_watermark/keys.py `load_keys()`, not memory:
+            # WATERMARK_KEY (hex secret) + optional WATERMARK_KEY_ID.
+            - name: WATERMARK_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: watermark-key
+                  key: WATERMARK_KEY
+            - name: WATERMARK_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: watermark-key
+                  key: WATERMARK_KEY_ID
+                  optional: true
+            # Must match the generation-side model exactly (task brief).
+            - name: MODEL_TOKENIZER
+              value: "Qwen/Qwen2.5-0.5B-Instruct"
+            # CRITICAL (see detector/app.py module docstring
+            # "WATERMARK_VOCAB_SIZE"): must equal the EXACT vocab_size used
+            # at generation time, not `len(tokenizer)` -- a mismatch
+            # silently produces near-zero scores with no error. 151936 is
+            # Qwen2.5-0.5B-Instruct's `config.json` `vocab_size`, the same
+            # value already fetched and cited in
+            # deploy/phase0/vllm-baseline-pod.yaml's header comment
+            # (`curl https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/raw/main/config.json`,
+            # EXECUTED 2026-08-08) and used by the Phase 1 generation run
+            # recorded in EXPERIMENTS.md.
+            - name: WATERMARK_VOCAB_SIZE
+              value: "151936"
+            # Default scheme for the generic `/api/v1/text/contents` route
+            # and for `/v1/watermark/detect` when no `scheme` is given. Also
+            # doubles as the practical default for the orchestrator's
+            # `watermark-kgw` DetectorConfig entry -- see orchestrator.yaml
+            # "Scheme wiring" for why `watermark-synthid` callers MUST pass
+            # `detector_params.scheme: synthid` explicitly rather than
+            # relying on this default.
+            - name: WATERMARK_DETECTOR_SCHEME
+              value: "synthid"
+          resources:
+            # Exactly the sizing given in the task brief (tokenizer + torch
+            # CPU, no model weights loaded): cpu 1 / mem 2Gi request, 4Gi
+            # limit. No cpu limit is set -- the brief specifies only a cpu
+            # REQUEST, and an unset cpu limit lets a request spike (e.g. a
+            # burst of large SynthID scoring calls, which are CPU-bound; see
+            # EXPERIMENTS.md's ~7ms/call greenlist-computation cost as the
+            # closest measured analogue) use spare node CPU rather than
+            # being throttled, at the cost of noisier-neighbor behavior --
+            # revisit if that's not the desired tradeoff for this cluster.
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              memory: 4Gi
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/hf
+          # /ready (per task brief) -- detector/app.py: 503 until BOTH the
+          # tokenizer has loaded (`AutoTokenizer.from_pretrained`, needs
+          # network egress to huggingface.co on every pod start, since
+          # `hf-cache` is an emptyDir and does not persist across restarts)
+          # AND at least one watermark key is configured; 200 with
+          # `key_ids` once both are true. Timing NOT measured by this task
+          # (no pod was started) -- initialDelaySeconds/failureThreshold
+          # below are a conservative starting guess (tokenizer-only
+          # download, no model weights, so this should be materially
+          # faster than deploy/phase0's vLLM pods' 60s+ model-load delay);
+          # tighten or loosen after the first real deploy and record actual
+          # observed time-to-Ready in EXPERIMENTS.md per this repo's
+          # verification discipline.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 24
+          # /health (per task brief) -- detector/app.py: always 200 once the
+          # process is up, independent of tokenizer/key state (mirrors the
+          # readiness-vs-liveness split documented in that module's own
+          # docstring: "the service still starts (GET /health stays 200)
+          # but GET /ready reports not-ready"). Short initialDelay is safe
+          # precisely because this endpoint does not wait on the tokenizer
+          # download.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+      volumes:
+        # Backs HF_HOME=/tmp/hf (detector/Dockerfile ENV) with a real
+        # writable volume at runtime, per the task brief ("writable
+        # HF_HOME=/tmp/hf pointing at emptyDir at runtime"). sizeLimit is
+        # generous for a tokenizer-only cache (no model weights) --
+        # Qwen2.5-0.5B-Instruct's tokenizer.json + vocab files are a few MB.
+        - name: hf-cache
+          emptyDir:
+            sizeLimit: 512Mi

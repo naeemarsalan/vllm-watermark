@@ -65,7 +65,7 @@ Every claim below carries a verification tag defined in [`docs/facts.md`](docs/f
 - [x] Phase 0 — baseline vLLM v0.18.0 serving and benchmark on OpenShift (`EXECUTED`; [run record](EXPERIMENTS.md#2026-08-08--phase-0-baseline-serving--benchmark-executed))
 - [x] KGW package, detector, and benchmark tooling implemented (`STATIC`); 34-test local suite executed at the recorded 2026-08-08 revision (`EXECUTED`; [run record](EXPERIMENTS.md#2026-08-08--vllm_watermark-package-local-test-suite-executed))
 - [x] **Phase 1 — KGW logits processor running under `vllm serve`** (2026-08-08: TPR 1.000 / FPR 0.000 end-to-end on the cluster; overhead quantified; D1 closed — see `EXPERIMENTS.md`)
-- [ ] Phase 2 — SynthID-Text generation + detection ← next
+- [x] Phase 2 — SynthID-Text generation + detection (2026-08-08: untrained scorers TPR 1.000/FPR 0.000 through `vllm serve`; GPU hot path 2.57ms/tok; D8 closed)
 - [ ] Phase 3 — Detection service + current guardrails-path confirmation
 - [ ] Phase 4 — OpenShift AI deployment (custom runtime image + ServingRuntime)
 - [ ] Phase 5 — Benchmarks, robustness tests, hardening

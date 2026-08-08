@@ -303,3 +303,155 @@ thread-pool across rows, int32 storage, pinned-memory async copies).
 **Phase 1 acceptance: MET.** Clean statistical separation end-to-end through
 `vllm serve` (TPR 1.000, FPR 0.000, human max z 3.13 < 4); overhead quantified
 (table above); per-request control validated; negative tests executed verbatim.
+
+## 2026-08-08 — CORRECTION: Phase 1 ran two KGW processor instances (effective delta ~4.0)
+
+While wiring SynthID, we found by reading v0.18.0 source — and then REPRODUCED IN THE
+SERVING POD — that `_load_custom_logitsprocs()` concatenates auto-loaded entry-point
+plugins with `--logits-processors` FQCN classes **with no deduplication**:
+
+```
+>>> _load_custom_logitsprocs(["vllm_watermark.kgw.processor:KGWLogitsProcessor"])
+['KGWLogitsProcessor', 'SynthIDLogitsProcessor', 'KGWLogitsProcessor']   # KGW twice
+>>> _load_custom_logitsprocs([])
+['KGWLogitsProcessor', 'SynthIDLogitsProcessor']                          # fix
+```
+
+Because the Phase 1 pod both installed the wheel (entry point) and passed the flag,
+**every Phase 1 "watermark on" measurement ran two stacked KGW instances — effective
+delta ≈ 4.0, and two apply() passes of overhead.** What this invalidates and what it
+does not:
+
+- Still valid: end-to-end mechanism proof (D1), per-request control + HTTP-400
+  validation, plugin-off ≈ zero overhead, spec-decode error, all FPR numbers
+  (controls had no active processor), the wheel-injection deploy flow.
+- Superseded: watermarked z-distributions (were δ≈4), watermark-on overhead
+  (was 2 passes), and the "temp-0 not degraded" B18 note (was at δ≈4).
+
+Fix: manifests pass NO `--logits-processors` flag (entry points only — exactly one
+instance of each processor; verified in-pod, output above). Corrected single-instance
+measurements below. `docs/api-notes-vllm-v0.18.0.md` §8 documents the trap.
+
+## 2026-08-08 — Phase 1 corrected + Phase 2 SynthID through `vllm serve` (closes D8)
+
+**Environment:** same pod design (new GPU node `ip-10-0-0-85` after the sandbox's
+external scale-down — see below), image v0.18.0 by digest, wheel with both processors
+(entry points kgw + synthid), key `poc-2026-08` from Secret, VLLM_WATERMARK_DEFAULT=on,
+scheme via `vllm_xargs watermark_scheme` (default kgw). SynthID: depth 30, ngram_len 5,
+sampling table 2^16 seed 0, layer keys derived from the secret digest with canonical
+label `vllm_watermark.synthid.core.SYNTHID_KEY_LABEL`.
+
+### SynthID device-independence + GPU hot path (EXECUTED in pod, A10G)
+
+- `g_values` GPU vs CPU: **0 mismatching trials / 20** (full vocab 151936, depth 30) —
+  integer LCG + bit-exact moved table; CPU detection of GPU-generated text is sound.
+- `process_scores_row`: **2.57 ms/call on A10G vs 290.98 ms/call CPU** (measured
+  locally, clean run) — the device-native path is what makes SynthID servable
+  (~113×). CPU cost is architectural: depth×vocab sequential reduction passes.
+
+### Detection statistics (EXECUTED; 512-token corpora, T=0.7, n=120 each; controls:
+120 unwatermarked + 150 human)
+
+KGW single-instance δ=2.0 (report `benchmarks/data/phase2_kgw_fixed_report.md`):
+
+| corpus | n | mean z | min z | TPR@z≥4 | FPR@z≥4 |
+|---|---|---|---|---|---|
+| KGW δ2 T=0.7 512tok | 120 | 13.41 | 5.72 | **1.000** | — |
+| KGW δ2 T=0.0 256tok | 40 | 9.91 | 6.47 | **1.000** | — |
+| unwatermarked | 120 | −0.08 | — | — | **0.000** |
+| human | 150 | 0.03 (max 3.13) | — | — | **0.000** |
+
+Corrected temp-0 note: at matched length (z scales ~√T; 13.41 at 512 ⇒ ~9.5 expected
+at 256), temp-0's mean z 9.91 shows **no additional degradation** for KGW δ2 on this
+model — the B18 literature expectation still did not materialize at the honest delta.
+Quality cost of greedy+bias remains unmeasured (Phase 5).
+
+SynthID (untrained scorers; reports `benchmarks/data/phase2_synthid_report_*.md`):
+
+| scorer | watermarked mean z (min) | TPR@z≥4 | control FPR |
+|---|---|---|---|
+| mean | 22.51 (12.24) | **1.000** | **0.000** (n=270) |
+| weighted mean | 23.61 (14.11) | **1.000** | **0.000** (n=270) |
+
+**D8 decision data:** the untrained weighted-mean scorer already achieves perfect
+separation at 512 tokens on this model; Bayesian-detector training (~10k matched
+examples, generable with our harness in <1h GPU) is NOT required for PoC-grade
+reliability. (200/256-token truncation table appended below when the comparison run
+completes.)
+
+### Overhead (EXECUTED; 100 req, 256 tok, T=0.7, conc 4, in-cluster)
+
+| configuration | agg. tok/s | p50 | vs 904.35 baseline |
+|---|---|---|---|
+| both processors loaded, watermark off | 913.78 | 1.115s | ~0% |
+| KGW on, single instance, LRU 1024 | **643.38** | 1.576s | **1.41×** |
+| SynthID on, GPU path, depth 30 | **287.82** | 3.563s | **3.17×** |
+| (superseded: KGW double-instance) | 444.83 | 2.275s | 2.03× |
+
+### Operational note
+
+The sandbox's external automation scaled the GPU MachineSet to 0 again during this
+phase (~hourly pattern holds). The replacement node received the
+`node-role.kubernetes.io/gpu` label automatically — the MachineSet fix from Phase 0
+verified in production. GPU scaled to 0 at phase end (all remaining work is CPU-side).
+
+**Phase 2 acceptance: MET** (SynthID generation+detection through `vllm serve` with
+quantified reliability; comparison table + 200-token row pending the local scoring
+run, appended below).
+
+## 2026-08-08 — Phase 3: detector service + FMS GuardrailsOrchestrator end-to-end (closes D5's executable half)
+
+**Context shift recorded first:** facts C11 (added in a parallel session, OFFICIAL-SRC)
+says RHOAI 3.4 labels FMS Guardrails **legacy** and points to NeMo Guardrails. We
+validated the FMS/TrustyAI detector contract anyway (it is the documented, shipped,
+executable detector interface today and what Phase 3 targets), and separately
+assessed the NeMo fit (`docs/api-notes-nemo-guardrails.md`): NeMo has NO first-class
+external-detector interface; the pattern is a custom `@action` POSTing to any URL —
+our direct endpoint fits; no watermark rail exists in the NVIDIA-NeMo org; RHOAI's
+`NemoGuardrails` CR mounts arbitrary ConfigMaps (custom actions permitted at CR
+schema level; live-CR verification needs RHOAI — Phase 4).
+
+**Build (EXECUTED):** detector image built on-cluster (BuildConfig docker-strategy,
+binary source from a **staged context containing only detector/ + dist/** — never the
+repo root, which holds gitignored live credentials; see deploy/phase3/README.md).
+Pushed: `image-registry…/watermark/detector@sha256:6250a08b…`. Deployments:
+`detector` (scheme env kgw) + `detector-synthid` (scheme env synthid) — same image.
+Orchestrator: `quay.io/opendatahub/ta-guardrails-orchestrator:odh-3.4.2.git`
+(self-reports **fms-guardrails-orchestr8 0.16.0** on :8034/health).
+
+**Findings by execution:**
+1. This orchestrator image **silently ignores** the 0.18.3+ `path_prefix` detector
+   config field (rollout succeeds, routing unchanged) — server-side scheme authority
+   therefore uses two Deployments with per-Deployment `WATERMARK_DETECTOR_SCHEME`.
+2. First wiring attempt failed cross-scheme because both Services selected
+   `app.kubernetes.io/component: detector` (label collision → round-robin across
+   schemes). Fixed with distinct component labels; endpoints verified disjoint.
+3. Orchestrator forwards client `detector_params` verbatim (source-predicted,
+   confirmed live: passing `{"scheme": "synthid"}` reroutes scoring).
+4. Health endpoints live on the dedicated :8034 port (`/health`, `/info`), not :8033.
+
+**Acceptance test (EXECUTED, all through `POST orchestrator:8033/api/v2/text/detection/content`,
+no client scheme params — server-side authority only):**
+
+```
+[PASS] kgw     -> watermark-kgw     : detected (kgw-watermark, score 1.0)
+[PASS] synthid -> watermark-synthid : detected (synthid-watermark, score 1.0)
+[PASS] kgw     -> watermark-synthid : not detected      [PASS] synthid -> watermark-kgw: not detected
+[PASS] clean   -> both              : not detected      [PASS] human   -> both         : not detected
+both-detectors-one-request: exactly the correct detector fires with detector_id attribution
+```
+
+**Signed results (EXECUTED):** Ed25519 key from Secret; `/v1/watermark/detect`
+returns detached JWS (`alg=EdDSA`, `kid=poc-signing-2026-08`, `b64=false`); verified
+locally against the public key; tampered payload correctly rejected. Key material in
+gitignored `cluster/`, never logged.
+
+**Zero retention (EXECUTED):** live pod logs contain request lines and hash-based
+records only — no submitted content (also pinned by a caplog unit test, 30/30 service
+tests pass locally).
+
+**Phase 3 acceptance: MET** — the orchestrator routes detection to our detector and
+returns correct verdicts for known-watermarked (both schemes) and known-clean text,
+end-to-end on the cluster. Remaining non-engineering item: RHOAI's FMS-legacy/NeMo
+transition (C11) means the *long-term* guardrails surface needs a NeMo custom-action
+integration decision — recorded in facts D5, not improvised here.

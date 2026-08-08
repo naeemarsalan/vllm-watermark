@@ -1,0 +1,97 @@
+# Task C3 -- ImageStream + BuildConfig for the watermark detector service
+# (detector/Dockerfile), built on-cluster from a binary (local directory)
+# source. Namespace `watermark` is REUSED from deploy/phase0/namespace.yaml
+# (already exists on the `ocp-ai` cluster -- confirmed by that task's own
+# read-only `oc get namespace watermark` check) rather than declaring a new
+# one here.
+#
+# Fields verified against OpenShift 4.20 docs, NOT from memory (fetched
+# 2026-08-08 via `gh api repos/openshift/openshift-docs/contents/...`,
+# branch `enterprise-4.20` -- the exact branch that generates the
+# docs.redhat.com/.../openshift_container_platform/4.20/... pages; the docs
+# site itself returned HTTP 403 to every direct fetch attempt from this
+# environment, so the GitHub source of the same content was used instead
+# and is cited per-field below):
+#
+#   * `spec.source.type: Binary` -- modules/builds-binary-source.adoc:
+#     "Streaming content from a local file system to the builder is called a
+#     `Binary` type build. The corresponding value of
+#     `BuildConfig.spec.source.type` is `Binary` for these builds. This
+#     source type is unique in that it is leveraged solely based on your use
+#     of the `oc start-build`." Same module documents `--from-dir` as one of
+#     the three `oc start-build` binary-input options (used in this task's
+#     README).
+#   * `spec.strategy.type: Docker` + `spec.strategy.dockerStrategy` --
+#     rest_api/workloads_apis/buildconfig-build-openshift-io-v1.adoc lists
+#     `spec.strategy.dockerStrategy` ("DockerBuildStrategy defines input
+#     parameters specific to container image build") and `spec.strategy.type`
+#     ("type is the kind of build strategy") as the two relevant
+#     `spec.strategy` sub-fields.
+#   * `spec.strategy.dockerStrategy.dockerfilePath` --
+#     modules/builds-strategy-dockerfile-path.adoc: "The `dockerfilePath`
+#     field allows the build to use a different path to locate your
+#     Dockerfile, relative to the `BuildConfig.spec.source.contextDir`
+#     field." `contextDir` is left unset below (defaults to the root of
+#     whatever `oc start-build --from-dir` streams -- see README), so
+#     `dockerfilePath: detector/Dockerfile` is relative to that root.
+#   * `spec.output.to` (`kind: ImageStreamTag`) -- same rest_api doc,
+#     `.spec.output`: "`to` ... Kind must be one of 'ImageStreamTag' or
+#     'DockerImage'."
+#
+# apiVersion `build.openshift.io/v1` / `image.openshift.io/v1` are the
+# standard, stable (the BuildConfig rest_api doc's own compatibility note:
+# "Compatibility level 1: Stable within a major release for a minimum of 12
+# months or 3 minor releases") API groups for these kinds; unchanged across
+# every OpenShift 4.x line, including 4.20 per the fetched enterprise-4.20
+# rest_api doc itself being generated under that same apiVersion heading.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: detector
+  namespace: watermark
+  labels:
+    app.kubernetes.io/part-of: vllm-watermark
+    app.kubernetes.io/component: detector
+spec: {}
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: detector
+  namespace: watermark
+  labels:
+    app.kubernetes.io/part-of: vllm-watermark
+    app.kubernetes.io/component: detector
+spec:
+  # No `contextDir`: the binary source streamed by `oc start-build
+  # --from-dir=<staged dir>` (see README "Build context safety" for why the
+  # staged dir, not the raw repo root, is what the runbook actually streams)
+  # has `dist/` and `detector/` at its root, matching detector/Dockerfile's
+  # own COPY paths (`COPY detector/requirements.txt ...`, `COPY dist/*.whl
+  # ...`), which are written relative to that root.
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: detector/Dockerfile
+      # noCache left at its default (false, i.e. layer caching IS used) --
+      # deliberate: detector/Dockerfile puts the two large, slow-to-install
+      # layers (the CPU torch wheel, the detector requirements.txt stack)
+      # BEFORE `COPY dist/*.whl`, specifically so a rebuild triggered only by
+      # a changed vllm_watermark wheel reuses those cached layers instead of
+      # re-downloading torch every time.
+  output:
+    to:
+      kind: ImageStreamTag
+      name: detector:latest
+  # Explicitly NOT setting spec.triggers (e.g. a `Generic`/`GitHub` webhook,
+  # or an `ImageChange` trigger off the python:3.12-slim base) -- per
+  # modules/builds-binary-source.adoc, "automatically triggering a binary
+  # type build ... is not possible" for Binary-source BuildConfigs, since
+  # the local directory content cannot be re-supplied without a human/CI
+  # step running `oc start-build --from-dir` again. Builds are triggered
+  # manually per the README's runbook.
+  successfulBuildsHistoryLimit: 3
+  failedBuildsHistoryLimit: 3

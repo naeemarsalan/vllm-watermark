@@ -1,0 +1,25 @@
+# Detector service (Task C3) container dependencies -- EVERYTHING except
+# torch, which is installed separately in detector/Dockerfile from the CPU
+# wheel index (https://download.pytorch.org/whl/cpu) so it never pulls the
+# ~2GB CUDA-bundled default `torch` wheel from PyPI.
+#
+# Versions pinned to the exact local workstation environment `detector/app.py`
+# was written and exercised against (`python3 -m pip show <pkg>`, EXECUTED
+# 2026-08-08 on this task's workstation: Python 3.14.4). Pinning matters here
+# specifically for pydantic (2.x request/response models in app.py use
+# pydantic v2 API: field_validator, model_validator, RootModel -- a v1
+# install would fail at import) and for transformers (tokenizer output must
+# match every z-score number already recorded in EXPERIMENTS.md).
+#
+# starlette is NOT listed: fastapi pins a compatible starlette itself as a
+# transitive dependency, and app.py only imports
+# `starlette.concurrency.run_in_threadpool`, which has been stable across the
+# starlette versions fastapi 0.115.x depends on -- pinning it separately would
+# just be a second place this file could drift out of sync with fastapi's own
+# requirement.
+fastapi==0.115.12
+uvicorn==0.34.3
+pydantic==2.12.5
+PyJWT==2.10.1
+cryptography==46.0.5
+transformers==4.57.6

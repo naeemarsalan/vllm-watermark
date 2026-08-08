@@ -1,0 +1,324 @@
+# Phase 3 — detector service + standalone FMS Guardrails Orchestrator
+
+Manifests in this directory stand up (1) the watermark detector service as a
+built-on-cluster image (`detector-build.yaml`, `detector-deploy.yaml`) and
+(2) a **standalone** (not RHOAI-managed) FMS Guardrails Orchestrator wired
+to it in detection-only mode (`orchestrator.yaml`), on plain OpenShift 4.20
+(`ocp-ai`) with **no RHOAI installed**. The RHOAI-managed Guardrails flavor
+(operator-installed, dashboard-configured) is Phase 4
+(`docs/implementation.md`) — this phase deploys the upstream
+`foundation-model-stack/fms-guardrails-orchestrator` project directly.
+
+Written by a read-only cluster-inspection task per its brief — **nothing in
+this directory has been applied to the cluster**. Every `oc`/`curl`/
+`skopeo`/`gh api` command that produced evidence cited in a manifest's
+header comment is reproducible verbatim; the orchestrator applies manifests
+in the order below.
+
+CPU-only throughout (tokenizer + torch CPU scoring for the detector; a
+stateless Rust HTTP proxy for the orchestrator) — **no GPU node needed**,
+unlike `deploy/phase0`/`deploy/phase1`. Don't run `scripts/scale-gpu.sh 1`
+for this phase.
+
+## Prerequisites
+
+```bash
+export KUBECONFIG=cluster/auth/kubeconfig   # repo-root relative; gitignored, never print its contents
+```
+
+- **Namespace**: this phase reuses the `watermark` namespace created by
+  `deploy/phase0/namespace.yaml` (`oc apply -f deploy/phase0/namespace.yaml`
+  if starting from a clean cluster — idempotent either way, see that file's
+  own comment).
+- **Watermark key Secret**: this phase reuses the EXISTING `watermark-key`
+  Secret from `deploy/phase0/secret-template.yaml` → `secret.yaml`
+  (gitignored). If Phase 0/1 already ran on this cluster, it's already
+  there; if not, follow `deploy/phase0/README.md` §1 to create it before
+  continuing (`detector-deploy.yaml`'s env references it by name and will
+  sit `CreateContainerConfigError` without it).
+- **`pyyaml`**: used below only to validate this directory's own YAML syntax
+  locally, not by anything that runs in-cluster. Already present on the
+  local workstation (`python3 -c "import yaml; print(yaml.__version__)"` →
+  `6.0.2`, checked by this task — no `pip install` was needed).
+
+## 1. Build the wheel
+
+```bash
+./deploy/phase0/build-wheel.sh
+# -> dist/vllm_watermark-0.1.0.dev0-py3-none-any.whl (re-run whenever
+#    src/vllm_watermark/ changes; see that script's own header comment)
+```
+
+## 2. Build context safety — read before running `oc start-build`
+
+`detector/Dockerfile` needs both `dist/*.whl` and `detector/` in its build
+context, so the context can't just be the `detector/` directory alone. The
+task brief's suggested command was `oc start-build detector --from-dir=.`
+(repo root) — **this task deliberately does not recommend that literally**,
+for a concrete reason: the repo root also contains `cluster/`, a **gitignored
+directory holding live OpenShift credentials** (kubeconfig, kubeadmin
+password, installer TLS material — see repo-root `.gitignore` and
+`AGENTS.md` §3, "never commit, print, echo, or paste their contents").
+`oc start-build --from-dir=DIR` archives and streams the literal contents of
+`DIR` from the local filesystem (per OpenShift 4.20 docs,
+`modules/builds-binary-source.adoc`, fetched from `openshift/openshift-docs`
+branch `enterprise-4.20` since `docs.redhat.com` itself returned HTTP 403 to
+every fetch attempt from this environment) — nothing in the fetched docs
+confirms that step is filtered by `.dockerignore` the way a local `docker
+build`'s context-collection step is. Rather than gamble live credentials on
+an unconfirmed detail, stage a directory containing only what the Dockerfile
+actually needs and point `--from-dir` at that instead:
+
+```bash
+rm -rf /tmp/detector-build-ctx
+mkdir -p /tmp/detector-build-ctx/dist
+cp -r detector /tmp/detector-build-ctx/detector
+cp dist/vllm_watermark-*.whl /tmp/detector-build-ctx/dist/
+# Sanity check: this must NOT print anything under cluster/, research/, aws, etc.
+find /tmp/detector-build-ctx -type f
+```
+
+A repo-root `.dockerignore` (`cluster/`, `research/`, `benchmarks/data/`,
+`benchmarks/results/`, `.git/`, `gpu/`, `*.pem`, `*.key`, `aws`) is also
+provided as defense in depth for anyone who instead runs a plain local
+`docker build` / `podman build -f detector/Dockerfile .` from the repo root
+(that path DOES honor `.dockerignore`, per standard docker/podman/Buildah
+semantics — see that file's own header comment) — it is not what the
+`oc start-build` step below relies on for safety.
+
+## 3. Create the ImageStream + BuildConfig, then build
+
+```bash
+oc apply -f deploy/phase3/detector-build.yaml
+oc -n watermark start-build detector --from-dir=/tmp/detector-build-ctx --follow
+```
+
+Watch for `Push successful` at the end of the follow output, then confirm
+the ImageStreamTag exists:
+
+```bash
+oc -n watermark get istag detector:latest
+```
+
+## 4. Deploy the detector service
+
+```bash
+oc apply -f deploy/phase3/detector-deploy.yaml
+oc -n watermark wait --for=condition=Available deploy/detector --timeout=5m
+```
+
+The Deployment's `image.openshift.io/triggers` annotation (see that file's
+header comment for the exact OpenShift 4.20 doc citations) means the
+placeholder `image:` field in the manifest gets overwritten with the real
+built image automatically once step 3's build completes and updates the
+`detector:latest` ImageStreamTag — `oc apply`-ing `detector-deploy.yaml`
+*before* step 3 has ever produced a build is fine (the pod sits
+`ImagePullBackOff` on the placeholder pull spec until the trigger fires),
+but doing step 3 first, as ordered above, avoids that transient state.
+
+Sanity-check the plugin loaded and the key is configured:
+
+```bash
+oc -n watermark port-forward svc/detector 8000:8000 &
+curl -s http://localhost:8000/health
+# -> {"status":"ok"}
+curl -s http://localhost:8000/ready
+# -> {"status":"ready","tokenizer_loaded":true,"key_ids":["<your key_id>"]}
+#    (503 with tokenizer_loaded/keys_configured booleans if not yet ready —
+#    see detector-deploy.yaml's readinessProbe comment for expected timing)
+```
+
+## 5. Deploy the orchestrator
+
+```bash
+oc apply -f deploy/phase3/orchestrator.yaml
+oc -n watermark wait --for=condition=Available deploy/orchestrator --timeout=3m
+```
+
+```bash
+oc -n watermark port-forward svc/orchestrator 8034:8034 &
+curl -s http://localhost:8034/health
+# -> {"fms-guardrails-orchestr8":"0.17.0"}
+```
+
+If this 503s or connection-refuses, check `oc -n watermark logs
+deploy/orchestrator` first — a config parse error (e.g. a YAML typo in the
+`orchestrator-config` ConfigMap) crash-loops the container immediately
+rather than starting degraded, since the whole config is loaded once at
+process start (`OrchestratorConfig::load`, `src/main.rs`).
+
+## 6. Exercise both endpoints
+
+Read `orchestrator.yaml`'s header comment ("Scheme wiring") before running
+these — in short: **`watermark-kgw` works with empty `detector_params`;
+`watermark-synthid` does NOT** — the pinned orchestrator image predates
+`path_prefix`-based routing, so scheme selection for the SynthID detector
+relies entirely on the caller passing `"scheme": "synthid"` explicitly.
+Every example below reflects that.
+
+### (a) Direct detector endpoint — `/v1/watermark/detect`
+
+Port-forward from step 4 (`svc/detector` on `localhost:8000`) still needs to
+be running.
+
+```bash
+# A text with genuinely high z-score is needed to see a `true` verdict —
+# substitute a real Phase 1/2 watermarked sample from EXPERIMENTS.md /
+# benchmarks/data/ output (gitignored, not checked in) rather than this
+# placeholder, which is far too short to score meaningfully (see
+# detector/app.py's `InsufficientTokensError` — KGW needs >= 2 tokens,
+# SynthID needs >= ngram_len (default 5), or it 422s).
+curl -s http://localhost:8000/v1/watermark/detect \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "<paste a known-watermarked KGW sample here>", "scheme": "kgw"}'
+```
+
+Expected shape (fields per `detector/app.py::_build_detect_result` —
+`signature`/`signing` are `null`/`"disabled"` unless `SIGNING_KEY_PATH` is
+configured, which this Deployment does not set):
+
+```json
+{
+  "scheme": "kgw",
+  "key_id": "<your key_id>",
+  "verdict": true,
+  "z_score": 21.35,
+  "p_value": 1.2e-101,
+  "score": 1.0,
+  "num_tokens_scored": 254,
+  "detector_version": "vllm-watermark-detector/0.1.0.dev0",
+  "model_tokenizer": "Qwen/Qwen2.5-0.5B-Instruct",
+  "scheme_details": {"num_green": 210, "gamma": 0.25},
+  "signature": null,
+  "signing": "disabled"
+}
+```
+
+### (b) Orchestrator — `POST /api/v2/text/detection/content`
+
+Port-forward `svc/orchestrator` on its main port too:
+`oc -n watermark port-forward svc/orchestrator 8033:8033 &`
+
+**KGW** (matches the task brief's literal example — empty `detector_params`
+works here because the detector's `WATERMARK_DETECTOR_SCHEME` env default is
+`kgw`, see detector-deploy.yaml):
+
+```bash
+curl -s http://localhost:8033/api/v2/text/detection/content \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "content": "<paste a known-watermarked KGW sample here>",
+        "detectors": {"watermark-kgw": {}}
+      }'
+```
+
+**SynthID** (`scheme` REQUIRED, per "Scheme wiring" above):
+
+```bash
+curl -s http://localhost:8033/api/v2/text/detection/content \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "content": "<paste a known-watermarked SynthID sample here>",
+        "detectors": {"watermark-synthid": {"scheme": "synthid"}}
+      }'
+```
+
+Expected shape when a detection fires (`ContentAnalysisResponse`, per
+`src/clients/detector.rs` at the pinned image's `0.17.0` vintage — field
+names verified by reading that struct's `Deserialize` derive, not the task
+brief's prose):
+
+```json
+{
+  "detections": [
+    {
+      "start": 0,
+      "end": 987,
+      "text": "<the submitted content, echoed back>",
+      "detection": "kgw-watermark",
+      "detection_type": "watermark",
+      "detector_id": "watermark-kgw",
+      "score": 1.0,
+      "metadata": {
+        "z_score": 21.35,
+        "p_value": 1.2e-101,
+        "key_id": "<your key_id>",
+        "scheme": "kgw",
+        "num_tokens_scored": 254,
+        "detector_version": "vllm-watermark-detector/0.1.0.dev0",
+        "num_green": 210,
+        "gamma": 0.25
+      }
+    }
+  ]
+}
+```
+
+Below the detector's own z-threshold (default z≥4.0), the detector service
+returns an empty per-content list (deliberate "no detection" convention —
+see `detector/app.py`'s docstring citation of the upstream
+`detectors/huggingface/detector.py` behavior it mirrors), so the orchestrator
+response for unwatermarked/human text is `{"detections": []}`, not an error.
+
+**Note (unconfirmed, flagged honestly):** `ContentAnalysisResponse.detector_id`
+is `Option<String>` in the orchestrator's own schema, and a single request
+CAN name multiple detectors at once (e.g. `"detectors": {"watermark-kgw":
+{}, "watermark-synthid": {"scheme": "synthid"}}`) since `detectors` is a
+map. This task traced that `detector_id` exists as a field and that the
+per-detector request loop carries a `detector_id` value
+(`src/orchestrator/common/client.rs::detect_text_contents`), but did **not**
+trace the exact line that stamps it onto each response entry for this
+specific endpoint — treat "the combined-request response reliably
+disambiguates which entries came from which detector via `detector_id`" as
+`OPEN` until executed and observed directly, and prefer separate one-detector
+requests (as shown above) if that distinction matters for your use.
+
+## 7. Teardown
+
+```bash
+oc -n watermark delete -f deploy/phase3/orchestrator.yaml --ignore-not-found
+oc -n watermark delete -f deploy/phase3/detector-deploy.yaml --ignore-not-found
+oc -n watermark delete -f deploy/phase3/detector-build.yaml --ignore-not-found
+rm -rf /tmp/detector-build-ctx
+```
+
+The `watermark` namespace and `watermark-key` Secret are left in place
+deliberately (shared with Phase 0/1, cheap, no billing impact) — see
+`deploy/phase0/README.md` §5 for the same convention. No GPU node was used
+by this phase, so there is nothing to scale down.
+
+## Acceptance evidence
+
+This task built and validated manifests only — it did **not** apply
+anything to the cluster (per its brief) and therefore recorded no execution
+evidence. Running the sequence above and confirming (i) a correct verdict
+for known-watermarked KGW text, (ii) a correct verdict for known-watermarked
+SynthID text (with explicit `scheme`), and (iii) an empty/negative result
+for known-clean text, through the ORCHESTRATOR path end to end, is exactly
+Phase 3's acceptance criterion in `docs/implementation.md`
+("the selected, current guardrails path routes a detection request to our
+detector and returns a correct verdict ... demonstrated end-to-end on the
+cluster, with transcripts in `EXPERIMENTS.md`"). **That run, and the
+`EXPERIMENTS.md` entry it produces, is the orchestrator's job, not this
+task's** — do not treat anything in this directory as `EXECUTED` until that
+happens.
+
+## YAML validation (this task)
+
+```bash
+python3 -c "
+import pathlib, yaml
+for p in sorted(pathlib.Path('deploy/phase3').glob('*.yaml')):
+    docs = list(yaml.safe_load_all(p.read_text()))
+    print(f'{p}: {len(docs)} document(s) OK')
+"
+```
+
+See this task's returned command output for the actual result of the run
+above (all four manifests + the repo-root `.dockerignore`'s absence of YAML
+syntax, since it's a plain-text ignore file, not YAML). This confirms only
+that the files PARSE as valid YAML — it is not a schema validation against
+the BuildConfig/Deployment/ConfigMap/Service OpenAPI schemas (no cluster
+access was used to do that; `oc apply --dry-run=server` against a live
+4.20 API server would be the next, stronger check, left to the
+orchestrator).

@@ -1,0 +1,304 @@
+# Task C3 -- standalone FMS Guardrails Orchestrator (detection-only), wired
+# to the watermark detector service (detector-deploy.yaml). Plain OpenShift
+# 4.20, NO RHOAI -- the RHOAI-managed Guardrails flavor is Phase 4
+# (docs/implementation.md), and fact C11 (docs/facts.md) already records
+# that RHOAI 3.4 labels the RHOAI-managed FMS Guardrails feature legacy.
+# This manifest deploys the upstream open-source orchestrator project
+# directly (not through RHOAI's operator/dashboard), so C11's deprecation
+# notice does not apply to it -- it applies to RHOAI's *packaging* of the
+# same upstream project, which this manifest does not use.
+#
+# --- Upstream project + image resolution (FETCHED, not from memory) -------
+#
+# Project: the GitHub repo is `foundation-model-stack/fms-guardrails-orchestrator`
+# (https://github.com/foundation-model-stack/fms-guardrails-orchestrator,
+# fetched via `gh api`, 2026-08-08); the COMPILED BINARY inside it is named
+# `fms-guardrails-orchestr8` (Cargo.toml `[package] name =
+# "fms-guardrails-orchestr8"`, confirmed by fetching that file directly --
+# this matches the task brief's spelling exactly, it is not a typo).
+#
+# Image: no image is published to Docker Hub/GHCR under the upstream repo's
+# own name; TrustyAI (the Red Hat team that maintains the RHOAI-facing
+# packaging of this same project) publishes one to
+# `quay.io/trustyai/ta-guardrails-orchestrator` (confirmed via
+# `curl -s https://quay.io/api/v1/repository?namespace=trustyai&public=true`,
+# 2026-08-08). Resolved to a digest via the Quay API:
+#
+#   $ curl -s "https://quay.io/api/v1/repository/trustyai/ta-guardrails-orchestrator?includeTags=true"
+#   -> tag "latest": manifest_digest
+#      sha256:f3952b137e2a21cb4445073d0d2ec6a76843ab3a957ecb8215158aa908027e1c
+#      last_modified "Tue, 23 Sep 2025 12:23:32 -0000" (the most recently
+#      pushed tag in the repository -- newer than every numbered `v1.3x.0`
+#      tag also present).
+#   $ skopeo inspect --config docker://quay.io/trustyai/ta-guardrails-orchestrator@sha256:f3952b13...
+#   -> config.User "orchestr8"; config.Cmd ["/app/bin/fms-guardrails-orchestr8"];
+#      config.Env includes "ORCHESTRATOR_CONFIG=/app/config/config.yaml";
+#      created "2025-09-23T12:23:26Z"; base ubi9-minimal 9.6.
+#
+# This matches upstream tag `0.17.0` in vintage: `gh api
+# repos/foundation-model-stack/fms-guardrails-orchestrator/releases` shows
+# `0.17.0` published 2025-09-22T17:34:26Z, one day before this image's build
+# timestamp, and `Cargo.toml` at that tag reads `version = "0.17.0"` --
+# consistent with `GET /health` on this image returning
+# `{"fms-guardrails-orchestr8":"0.17.0"}` (src/server.rs `health()`: a
+# `{CARGO_PKG_NAME: CARGO_PKG_VERSION}` map, verified by reading that
+# handler's source directly).
+#
+# --- Config schema (FETCHED at the resolved image's OWN vintage, tag
+# `0.17.0` -- not just current `main`, since a schema that's true today
+# could postdate what's actually baked into this image) ------------------
+#
+# `src/config.rs` at `?ref=0.17.0`:
+#   * `OrchestratorConfig.generation: Option<GenerationConfig>` --
+#     doc-comment "can be omitted if configuring for generation is not
+#     wanted"; `OrchestratorConfig::load()` only `warn!("no generation
+#     config provided")` if absent, never errors. Confirmed this is also
+#     true at current `main` (docs/architecture/adrs/004 -- "Orchestrator
+#     input only detection API" -- describes exactly this standalone-
+#     detection mode). generation/openai/router/tls are therefore all
+#     omitted below.
+#   * `OrchestratorConfig.chunkers: Option<HashMap<...>>` -- doc-comment "if
+#     omitted the default value \"whole_doc_chunker\" is used". Also omitted
+#     below.
+#   * `DetectorConfig` fields (all present at 0.17.0): `service:
+#     ServiceConfig` (hostname, port), `health_service: Option<ServiceConfig>`,
+#     `chunker_id: String`, `default_threshold: f64`, `r#type: DetectorType`
+#     (serde `rename_all = "snake_case"` -> `text_contents` for our
+#     detector's `/api/v1/text/contents`-shaped endpoint).
+#   * `src/clients/chunker.rs` `pub const DEFAULT_CHUNKER_ID: &str =
+#     "whole_doc_chunker"` (present at 0.17.0 too) and `src/config.rs`'s own
+#     validator: `detector.chunker_id == DEFAULT_CHUNKER_ID || <exists in
+#     chunkers map>` -- i.e. `whole_doc_chunker` validates successfully with
+#     NO entry in a `chunkers:` block at all, and needs no chunker service
+#     deployed. This is the "chunker: whole-doc" the task brief asks for.
+#   * Endpoint: `src/server/routes.rs` at `?ref=0.17.0`:
+#     `.route("/api/v2/text/detection/content", post(detection_content))`.
+#     `src/models.rs` `TextContentDetectionHttpRequest { content: String,
+#     detectors: HashMap<String, DetectorParams> }` (request),
+#     `TextContentDetectionResult { detections: Vec<ContentAnalysisResponse> }`
+#     (response). This is the ADR-004 "detection as primary task" endpoint
+#     (docs/architecture/adrs/004-orchestrator-input-only-api-design.md) --
+#     it requires NO generation config at all, so there was no "documented
+#     standalone/detection-only mode to go find" beyond what `generation`
+#     already being `Option` already gives; ADR-004 documents the intent,
+#     the `Option` field is what makes it actually work.
+#
+# --- Scheme wiring: detector_params.scheme, NOT path_prefix (DOCUMENTED
+# choice, per task brief "wire whichever the schema cleanly allows") -------
+#
+# `detector/app.py` exposes BOTH mechanisms (its own docstring, "Scheme
+# selection"): scheme-forced alias ROUTES (`/kgw/api/v1/text/contents`,
+# `/synthid/api/v1/text/contents`) and `detector_params.scheme` on the
+# generic route. The orchestrator schema has TWO features that could select
+# between them:
+#   (a) `ServiceConfig.path_prefix: Option<String>` -- would let a
+#       `watermark-synthid` DetectorConfig entry point at
+#       `http://detector:8000/synthid/` and hit the FORCED alias route,
+#       immune to caller mistakes.
+#   (b) `ContentAnalysisRequest.detector_params: DetectorParams` -- verified,
+#       by reading `src/orchestrator/common/tasks.rs::text_contents_detections`
+#       (`params.pop_threshold()` removes only the `threshold` key; every
+#       OTHER key the caller put in `detectors.<id>` params, e.g. `scheme`,
+#       is forwarded unmodified into `ContentAnalysisRequest.detector_params`
+#       -- confirmed at both current `main` and tag `0.17.0`), to reach our
+#       detector's generic route, which reads `detector_params["scheme"]`.
+#
+# `path_prefix` does NOT exist on the pinned image: `git log --format=... -S
+# path_prefix -- src/config.rs` (via `gh api search/commits`) shows it was
+# added by PR #523 ("adding path prefixes so that llm-d deployments are
+# compatible"), commit `95b3b4d6f0`, dated 2026-01-07 -- FOUR MONTHS after
+# this image's 2025-09-23 build. Confirmed directly: `gh api
+# .../contents/src/config.rs?ref=0.17.0` has no `path_prefix` field on
+# `ServiceConfig` at all (it first appears by tag `0.18.3`). Setting it in
+# this ConfigMap against the pinned image would be a silently-ignored no-op
+# (`ServiceConfig`'s Deserialize impl has no `deny_unknown_fields`), leaving
+# BOTH `watermark-kgw` and `watermark-synthid` hitting the identical
+# unprefixed `/api/v1/text/contents` route with no way to tell them apart --
+# strictly worse than just not writing it. Choice (b), detector_params.scheme,
+# is therefore what this ConfigMap relies on.
+#
+# CONSEQUENCE -- must be a hard requirement for callers, not a nicety:
+# `watermark-kgw` happens to work even with an EMPTY `detectors.watermark-kgw:
+# {}` request body, because the detector's own `WATERMARK_DETECTOR_SCHEME`
+# env default (detector-deploy.yaml) is `kgw` and the generic route falls
+# back to that default when `detector_params.scheme` is absent. But
+# `watermark-synthid` does NOT get its own default -- ONE running detector
+# process has exactly one `WATERMARK_DETECTOR_SCHEME` default, and it's set
+# to `kgw`. A caller who requests `watermark-synthid` WITHOUT
+# `"detector_params": {"scheme": "synthid"}` (or, in the `/api/v2/.../content`
+# request shape actually used here, WITHOUT `"detectors": {"watermark-synthid":
+# {"scheme": "synthid"}}`) silently gets a KGW-scored result mislabeled as
+# `watermark-synthid`, not an error. deploy/phase3/README.md's example
+# requests always pass `scheme` explicitly for BOTH detector ids for exactly
+# this reason -- copy those, do not simplify them to `{}`.
+#
+# FUTURE UPGRADE PATH (not applied here): if this Deployment's image is ever
+# bumped to an orchestrator build at or after commit 95b3b4d6f0 (roughly
+# upstream >=0.18.3, released 2026-01-15 per `gh api .../releases`),
+# `path_prefix: /kgw` / `path_prefix: /synthid` can be added to each
+# detector's `service:` block below to make the routing hard-enforced
+# server-side (immune to a caller omitting `detector_params.scheme`) --
+# see the commented block in the ConfigMap data for the exact shape.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: watermark
+  labels:
+    app.kubernetes.io/part-of: vllm-watermark
+    app.kubernetes.io/component: orchestrator
+data:
+  config.yaml: |
+    # No `generation:` / `openai:` / `router:` / `tls:` blocks: this is the
+    # detection-only standalone mode (see header comment). No `chunkers:`
+    # block either: `whole_doc_chunker` is a built-in sentinel chunker_id
+    # that needs no chunker service registered (see header comment).
+    detectors:
+      watermark-kgw:
+        type: text_contents
+        service:
+          hostname: detector
+          port: 8000
+          # -- FUTURE (requires image >= upstream commit 95b3b4d6f0, see
+          #    header comment) --
+          # path_prefix: /kgw
+        chunker_id: whole_doc_chunker
+        # Effectively a no-op secondary filter, not the primary gate: our
+        # detector already only returns a non-empty result when its OWN
+        # z-threshold verdict is true (default z>=4.0, see detector/app.py
+        # WATERMARK_Z_THRESHOLD), which maps to score = clamp(1-p_value) far
+        # above 0.5 in every case this repo has measured (EXPERIMENTS.md
+        # Phase 1: watermarked mean z 21.35 => p_value effectively 0,
+        # score ~1.0). 0.5 is a reasonable, conservative orchestrator-side
+        # threshold given that.
+        default_threshold: 0.5
+      watermark-synthid:
+        type: text_contents
+        service:
+          hostname: detector
+          port: 8000
+          # -- FUTURE -- path_prefix: /synthid
+        chunker_id: whole_doc_chunker
+        default_threshold: 0.5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: watermark
+  labels:
+    app.kubernetes.io/part-of: vllm-watermark
+    app.kubernetes.io/component: orchestrator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: orchestrator
+  ports:
+    # Defaults per `src/args.rs` `Args` (fetched, tag 0.17.0 and current
+    # main agree): `http_port` (env `HTTP_PORT`) default 8033 is the main
+    # guardrails API (`/api/v2/text/detection/content` and friends);
+    # `health_http_port` (env `HEALTH_HTTP_PORT`) default 8034 is a
+    # SEPARATE listener (`src/main.rs`: two distinct `SocketAddr`s, `run()`
+    # is passed both) serving only `/health` and `/info`
+    # (`src/server.rs::health_router`). Neither env var is overridden below
+    # -- both ports below are the image's own compiled-in defaults.
+    - name: http
+      port: 8033
+      targetPort: 8033
+    - name: health
+      port: 8034
+      targetPort: 8034
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: watermark
+  labels:
+    app.kubernetes.io/part-of: vllm-watermark
+    app.kubernetes.io/component: orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: orchestrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: orchestrator
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: orchestrator
+          image: quay.io/trustyai/ta-guardrails-orchestrator@sha256:f3952b137e2a21cb4445073d0d2ec6a76843ab3a957ecb8215158aa908027e1c
+          # Digest-pinned (see header comment for exact resolution steps),
+          # so no image change trigger is wired here the way
+          # detector-deploy.yaml has one -- there is no ImageStream tracking
+          # this externally-published image to trigger from. Bumping the
+          # image means editing this digest by hand and re-`oc apply`-ing
+          # (a plain Deployment picks up a changed `spec.template` image
+          # field on its own, no trigger machinery needed for that case).
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8033
+            - name: health
+              containerPort: 8034
+          env:
+            # Overrides the image's own default
+            # (ENV ORCHESTRATOR_CONFIG=/app/config/config.yaml, baked from
+            # `ARG CONFIG_FILE=config/config.yaml` in the upstream
+            # Dockerfile.amd64) to point at our mounted ConfigMap instead of
+            # the placeholder config.yaml baked into the image at that path.
+            - name: ORCHESTRATOR_CONFIG
+              value: /etc/orchestrator/config.yaml
+          volumeMounts:
+            - name: orchestrator-config
+              mountPath: /etc/orchestrator
+              readOnly: true
+          # No securityContext override: the image already sets `USER
+          # orchestr8` with primary group 0 (`skopeo inspect --config`,
+          # header comment; upstream Dockerfile.amd64:
+          # `adduser --system --uid 1001 --gid 0 ...`) -- OpenShift's
+          # restricted-v2 SCC will still assign its own arbitrary UID at
+          # admission time regardless (same convention noted throughout
+          # deploy/phase0), but this image was already built group-0-writable
+          # so no `fsGroup`/`runAsUser` override is needed for that to work.
+          #
+          # Resource sizing is an ENGINEERING ESTIMATE, not measured or
+          # given by the task brief (unlike detector-deploy.yaml's sizing,
+          # which the brief specified directly): this is a stateless Rust
+          # HTTP proxy doing JSON (de)serialization and forwarding to the
+          # detector Service, no model/tokenizer loaded, no persistent
+          # state. Left deliberately modest; revisit with real numbers once
+          # this is actually load-tested (out of scope for this task --
+          # acceptance evidence goes to EXPERIMENTS.md, orchestrator runs
+          # it, not this task).
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          # `/health` on the SEPARATE health port (8034), per header
+          # comment -- NOT port 8033.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8034
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8034
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 6
+      volumes:
+        - name: orchestrator-config
+          configMap:
+            name: orchestrator-config
