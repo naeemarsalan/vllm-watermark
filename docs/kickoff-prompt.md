@@ -1,23 +1,78 @@
-# Agent kickoff prompt
+# Implementation pickup — Phases 4 and 5
 
-The canonical prompt for an implementation agent picking up this repo. Paste it into a fresh agent session running on a machine with cluster access (`oc` logged in or `KUBECONFIG=cluster/auth/kubeconfig` available).
+Use this handoff only after reading [`AGENTS.md`](../AGENTS.md), then
+[`README.md`](../README.md), [`facts.md`](facts.md), and
+[`implementation.md`](implementation.md). `AGENTS.md` is the binding source for
+verification, licensing, secrets, cluster-safety, and evidence-handling rules.
 
----
+## Registered state (updated after 2026-08-09 execution)
 
-You are implementing EU AI Act text watermarking for vLLM on OpenShift AI in the repo `vllm-watermark`. This repo already contains a fully verified research base — do not re-litigate it, build on it.
+- Phases 0–3 have executed evidence within the recorded PoC scope: KGW and
+  SynthID ran through `vllm serve`; the detector ran through standalone FMS; and
+  a separate upstream `nemoguardrails==0.23.0` custom action returned the
+  recorded decisions (`EXECUTED`; [facts D1, D5, and D8](facts.md),
+  [`EXPERIMENTS.md`](../EXPERIMENTS.md)). The former standalone/Phase 3 scope is
+  historical; the current managed path is recorded separately below.
+- RHOAI 3.4 labels FMS Guardrails legacy and directs users to NeMo Guardrails
+  (`OFFICIAL-SRC`; [fact C11](facts.md)). The standalone FMS
+  proof is retained as historical execution evidence, not as the Phase 4 target.
+- The current RHOAI-managed `NemoGuardrails` custom-resource path executed with
+  metadata-only broker correlation, and the one-replica synchronous,
+  non-streaming D10 `N=1`/`N=5` acceptance matrix passed and then reran through
+  the current detector image (`EXECUTED`; [current build-5 D10
+  evidence](../EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09)).
+  External KServe/Istio pass-through, D6 supportability, D4 key lifecycle,
+  multi-replica/global sampling, streaming/asynchronous behavior, and
+  platform-wide retention remain `OPEN` (same evidence; [facts C8/D5/D6/D10](facts.md)).
+- D1 and D8 are closed; D2, D3, D4, D5, D6, D7, and the open D10 boundaries
+  remain as separated in the [fact register](facts.md). D9's scoped detector
+  startup contract is closed after the current startup-validation rebuild and
+  recovery (`EXECUTED`), while request/cache limits and generation-side bound parity
+  remain `OPEN` ([current detector reconciliation](../EXPERIMENTS.md#current-detector-reconciliation-2026-08-09)).
 
-Start by reading, in order: `AGENTS.md` (binding operating rules), `README.md`, `docs/facts.md`, `docs/implementation.md`. Skim `docs/technical.md` and `docs/openshift-ai.md` before writing any code, and `docs/cluster.md` before touching the cluster.
+## Delivery target
 
-Your mission: execute the implementation plan in `docs/implementation.md`, phases 0 through 3, in order — (0) baseline vLLM serving on the `ocp-ai` cluster's GPU node, (1) a KGW watermark logits processor running end-to-end through `vllm serve` with statistical detection validated against watermarked/unwatermarked/human corpora, (2) SynthID-Text generation and detection using Google's open-sourced implementation, (3) the detector wrapped as a service implementing the TrustyAI Guardrails detector contract (`POST /api/v1/text/contents`) and validated through the GuardrailsOrchestrator on the cluster. Phase 4 (RHOAI ServingRuntime deployment) follows only after 1–3 pass their acceptance criteria.
+The destination is watermark-enabled vLLM running through an actual OpenShift AI
+ServingRuntime/InferenceService path, with selected generated responses validated
+through the TrustyAI-compatible detector and the current RHOAI-managed guardrails
+path confirmed in Phase 4 (`EXECUTED`, scoped; [current build-5 D10
+evidence](../EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09)).
+Legacy FMS and the standalone upstream NeMo 0.23.0 PoC remain useful executed
+evidence (`EXECUTED` / `OFFICIAL-SRC`; facts C11/D5), but neither substitutes
+for the managed RHOAI path. External KServe/Istio pass-through and production
+supportability remain `OPEN` (same evidence; facts C8/D6).
 
-Non-negotiable rules (full detail in AGENTS.md):
-- Nothing "works" until you executed it and captured command + raw output in `EXPERIMENTS.md`. Static code reading is labeled STATIC, never presented as working.
-- Every number is measured or cited — never recalled. Update `docs/facts.md` tags in the same commit as the evidence.
-- Port algorithm code only from Apache-2.0 sources (`transformers`, `google-deepmind/synthid-text`, `MarkLLM`). Never copy from `eth-sri/unified-watermarking` — it has no license; design reference only.
-- Secrets: the `aws` file and `cluster/` are gitignored live credentials — never commit or print them. Watermark keys come from env/Secrets, never hardcoded or logged.
-- The GPU node is billable: scale it up with `./scripts/scale-gpu.sh 1` when starting, and **always scale to 0 before ending a session**.
-- The local workstation cannot run vLLM (Python 3.14, no GPU) — all vLLM execution happens in pods on the cluster.
-- Expected friction, verified in advance: custom logits processors error out with speculative decoding enabled (that's upstream, not your bug); Model Runner V2 falls back to V1; watermark signal degrades at temperature 0 and on structured output — measure and document these, don't fight them.
-- No personal names, internal communications, or customer identifiers anywhere in this repo.
+The executed D10 contract uses a fixed-frequency selector over completed
+responses, synchronous blocking, one replica, and non-streaming requests;
+`N=1` selects every completed response and `N=5` selects ordinals 5, 10, …
+(`EXECUTED`; [current build-5 D10
+evidence](../EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09)).
+The 20-response `N=1` and 100-response `N=5` runs covered balanced KGW/SynthID
+positive and clean cases, injected retries, bounded backpressure, and metrics.
+A separate controlled real-detector outage failed closed (`EXECUTED`; [earlier
+outage evidence](../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)).
+Streaming/asynchronous and multi-replica/global sampling remain `OPEN` (facts D4/D10).
 
-Definition of done for this engagement: Phase 1–3 acceptance criteria met with evidence in `EXPERIMENTS.md`, `docs/facts.md` gaps D1, D5, D8 closed (and D2/D3 if Phase 5 benchmarking is reached), and a reproducible `deploy/` path. Anything engineering cannot close (support-policy carve-out, legal grace-period scope) gets recorded as blocked, not improvised.
+## Pickup order
+
+1. Reconcile the shared worktree and read the existing evidence before making
+   changes. Preserve concurrent work.
+2. Review the executed Phase 4 scope in
+   [`implementation.md`](implementation.md#phase-4--rhoai-deployment-pattern-scopes-c8-informs-d6):
+   the internal predictor, managed `NemoGuardrails` action, metadata-only broker,
+   and D10 acceptance evidence are recorded in the [current transcript](../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted).
+   Keep external gateway/Istio pass-through, supportability, and retention
+   conclusions `OPEN`.
+3. Continue the unblocked Phase 5 work in
+   [`implementation.md`](implementation.md#phase-5--benchmarks-robustness-hardening),
+   including realistic-load measurements, robustness work, key-management design,
+   the remaining detector/generator resource hardening, and the open D10 production
+   boundaries. The scoped D9 startup and D10 single-replica synchronous acceptance
+   work is already recorded as executed; do not silently broaden those claims.
+4. Append every executed command and raw output to `EXPERIMENTS.md`; update
+   `facts.md` in the same change when evidence changes a registered status. Do not
+   upgrade a claim to `EXECUTED` from source inspection or reconstructed output.
+
+Do not treat Phase 0–3 reruns as missing acceptance work. Re-run them only when a
+Phase 4/5 change requires regression evidence, and preserve the new command and raw
+output under the repository's append-only evidence rules.

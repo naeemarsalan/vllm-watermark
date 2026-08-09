@@ -1,13 +1,13 @@
-# Phase 0/1 — bare-pod vLLM on the GPU node (pre-RHOAI)
+# Phases 0–2 — bare-pod vLLM on the GPU node (pre-RHOAI)
 
 Manifests in this directory stand up plain `vllm serve` (Phase 0 baseline)
 and the same thing with the KGW and SynthID watermark plugins wired in
-(Phases 1/2), as
-one-off pods directly on the cluster's GPU node — **not** through
+(Phases 1/2), as one-off pods directly on the cluster's GPU node — **not** through
 OpenShift AI / RHOAI's ServingRuntime/InferenceService machinery, which is
-Phase 4 (`docs/implementation.md`). This runbook was executed for Phases 0
-and 1 on 2026-08-08; commands and raw output are recorded in
-`EXPERIMENTS.md`, while the manifests below remain the reproducible source.
+Phase 4 ([implementation plan](../../docs/implementation.md)). This path was
+executed for the Phase 0 baseline, corrected single-instance KGW, and SynthID
+on 2026-08-08 (`EXECUTED`; [facts C9, D1, D2, and D8](../../docs/facts.md),
+[run log](../../EXPERIMENTS.md)). It is not an RHOAI deployment.
 
 ## Prerequisites
 
@@ -26,15 +26,44 @@ before proceeding — pods below will sit `Pending` until it is.
 oc apply -f deploy/phase0/namespace.yaml
 oc apply -f deploy/phase0/vllm-service.yaml
 
-cp deploy/phase0/secret-template.yaml deploy/phase0/secret.yaml   # gitignored — see deploy/phase0/.gitignore
-# edit secret.yaml: replace REPLACE_ME_WITH_HEX_SECRET with a real hex
-# key (e.g. `python3 -c "import secrets; print(secrets.token_hex(32))"`
-# — run locally, never paste the output into a place that gets logged)
-oc apply -f deploy/phase0/secret.yaml
+if test -e deploy/phase0/secret.yaml; then
+  echo 'deploy/phase0/secret.yaml already exists; not overwriting it'
+else
+  install -m 600 deploy/phase0/secret-template.yaml deploy/phase0/secret.yaml
+  echo 'edit the gitignored secret.yaml and replace its placeholder before continuing'
+fi
 ```
 
-The Secret is only consumed by `vllm-watermark-pod.yaml` (§3) — the
-baseline pod (§2) needs no key.
+Edit `deploy/phase0/secret.yaml` before running the next block. The validation
+runs in a subshell, so a placeholder produces a failing status without exiting
+the caller's interactive shell (`STATIC`; command structure below):
+
+```bash
+(
+  set -eu
+  if oc -n watermark get secret watermark-key >/dev/null 2>&1; then
+    echo 'watermark-key already exists; reusing it'
+  elif grep -q 'REPLACE_ME_WITH_HEX_SECRET' deploy/phase0/secret.yaml; then
+    echo 'refusing to apply secret.yaml while its placeholder remains' >&2
+    exit 1
+  else
+    oc apply -f deploy/phase0/secret.yaml
+  fi
+)
+```
+
+Applying replacement data to the cluster Secret changes the watermark key
+consumed by the pods (`STATIC`; manifests); rotation and corpus/key-version
+coordination remain `OPEN` under D4.
+Generate key material without putting it in shell history or logs, and never
+commit the gitignored file ([repository rules](../../AGENTS.md#3-secrets-and-safety)).
+
+Within this Phases 0–2 serving path, only
+[`vllm-watermark-pod.yaml`](vllm-watermark-pod.yaml) (§3) consumes the Secret;
+the baseline pod (§2) needs no key. The Phase 3
+[`detector`](../phase3/detector-deploy.yaml) and
+[`detector-synthid`](../phase3/detector-synthid-deploy.yaml) Deployments are
+separate consumers (`STATIC`; linked manifests).
 
 ## 2. Phase 0 baseline pod
 
@@ -43,9 +72,8 @@ oc apply -f deploy/phase0/vllm-baseline-pod.yaml
 oc -n watermark wait --for=condition=Ready pod/vllm-baseline --timeout=15m
 ```
 
-`--timeout=15m` is generous, not a claim about actual cold-start time —
-first-run image pull is ~9.5GiB (see digest evidence in the pod manifest)
-plus model download into the `/models-cache` emptyDir on top of that. Consult
+`--timeout=15m` is a conservative runbook timeout, not a cold-start claim.
+It includes image pull and model download into the `/models-cache` emptyDir. Consult
 the recorded Phase 0 run in `EXPERIMENTS.md` for the observed execution rather
 than treating this conservative timeout as a startup-time measurement.
 
@@ -58,7 +86,7 @@ curl -s http://localhost:8000/health
 curl -s http://localhost:8000/v1/models
 ```
 
-## 3. Phase 1 watermark pod — wheel-injection sequence
+## 3. Phases 1–2 watermark pod — wheel-injection sequence
 
 The watermark pod's container starts and **blocks** waiting for a
 sentinel file; it will not begin loading the model until you complete
@@ -67,9 +95,8 @@ this shape was chosen over the alternatives considered (ConfigMap of the
 whole package, a version-matched initContainer, etc.).
 
 ```bash
-# 1. Build the wheel locally (pure-Python; matches ANY Python 3.11+/3.14
-#    interpreter, so this does not need to match the pod's Python
-#    version — see build-wheel.sh header comment). The output path is
+# 1. Build the py3-none-any wheel locally (`STATIC`; pyproject/build script).
+#    The output path is
 #    dist/vllm_watermark-0.1.0.dev0-py3-none-any.whl; its size changes with
 #    the package. Re-run this whenever src/vllm_watermark/ changes.
 ./deploy/phase0/build-wheel.sh
@@ -91,39 +118,41 @@ oc -n watermark cp dist/vllm_watermark-0.1.0.dev0-py3-none-any.whl \
     vllm-watermark:/plugin/vllm_watermark-0.1.0.dev0-py3-none-any.whl
 oc -n watermark exec vllm-watermark -- touch /plugin/ready
 
-# 5. Watch it install the wheel and start vllm serve.
-oc -n watermark logs -f vllm-watermark
+# 5. Wait for startup, then inspect the captured startup logs.
 oc -n watermark wait --for=condition=Ready pod/vllm-watermark --timeout=15m
+oc -n watermark logs vllm-watermark
 ```
 
 Sanity-check the plugin actually loaded (should appear in the startup
-logs from `KGWLogitsProcessor.__init__`'s `logger.info(...)` call — see
-`src/vllm_watermark/kgw/processor.py`):
+logs from both processors' `logger.info(...)` calls):
 
 ```bash
-oc -n watermark logs vllm-watermark | grep -i "KGWLogitsProcessor initialized"
+oc -n watermark logs vllm-watermark \
+  | grep -E "(KGW|SynthID)LogitsProcessor initialized"
 ```
 
-Then run the negative/positive test protocol from
-`docs/implementation.md` Phase 1 (temperature 0, structured-output
-request, spec-decode flag, ≥100 watermarked/unwatermarked/human-corpus
-generations) through `svc/vllm` — same Service, same DNS name, as §2,
-since only one of the two pods is ever up at a time (see
-`vllm-service.yaml`).
+The wheel registers KGW and SynthID as entry points, and the manifest
+intentionally passes no `--logits-processors` flag. Adding the KGW FQCN as
+well as installing the wheel loads KGW twice; the earlier delta≈4 signal and
+active-path overhead measurements are superseded (`EXECUTED`; [double-load
+correction](../../EXPERIMENTS.md#2026-08-08--correction-phase-1-ran-two-kgw-processor-instances-effective-delta-40)).
+Use `vllm_xargs.watermark_scheme` to select `kgw` or `synthid` per request
+(`EXECUTED`; [corrected Phase 1/2 run](../../EXPERIMENTS.md#2026-08-08--phase-1-corrected--phase-2-synthid-through-vllm-serve-closes-d8)).
+
+Then run the negative/positive request protocols from
+`docs/implementation.md` Phases 1 and 2 (KGW, SynthID, temperature 0,
+structured output, and the recorded corpora) through `svc/vllm` — the same
+Service and DNS name as §2, since only one of the two pods is up at a time.
+Speculative-decoding rejection is a separate startup probe, not a request to
+the running Service; reproduce it only as documented in the B7 experiment.
 
 ## 4. Benchmark execution (in-cluster, not port-forward)
 
-Recommendation: run `benchmarks/*.py` from inside the cluster against
-`http://vllm:8000/v1` (the Service's in-cluster DNS name), not through a
-local `oc port-forward`. Reasons: (a) `bench_serving.py`'s own docstring
-says it's "designed to run inside a lightweight bench pod" — this was an
-existing design decision in the benchmark script, not invented here; (b)
-throughput/latency numbers measured through a port-forward include the
-port-forward tunnel's own overhead and are not representative of
-production request paths; (c) a long benchmark run (≥100 generations ×
-256 tokens, per the Phase 1 acceptance criteria) is a poor fit for a
-foreground `port-forward` process that dies if your local
-network/terminal session hiccups.
+The recorded performance runs executed `benchmarks/*.py` inside the cluster
+against `http://vllm:8000/v1` (`EXECUTED`; [Phase 0 and corrected Phase 1/2
+records](../../EXPERIMENTS.md)). Keep that path for comparable reruns. A local
+port-forward adds an unmeasured hop, so results collected through it must not
+be compared to the recorded in-cluster baseline without qualification.
 
 ```bash
 oc apply -f deploy/phase0/bench-pod.yaml
@@ -159,17 +188,16 @@ recommended flow is `oc cp` the generated JSONL corpora (watermarked +
 unwatermarked + human) back to the workstation and run
 `analyze_detection.py` there against the local `transformers==4.57.6`
 install, rather than installing the wheel a second time inside `bench`.
-(It's a plain `pip install .` locally if you do want it in-cluster too —
-not covered further here since it wasn't needed for anything in this
-task.)
+That local detector/test path is covered by the recorded test and analysis
+runs (`EXECUTED` at the recorded revision; facts B21/D1/D8).
 
 ## 5. Teardown
 
 ```bash
 oc -n watermark delete pod vllm-baseline vllm-watermark bench --ignore-not-found
 oc delete -f deploy/phase0/vllm-service.yaml --ignore-not-found
-# Namespace and Secret left in place deliberately (cheap, no billing
-# impact) unless you're tearing down the whole spike — delete
+# Namespace and Secret left in place deliberately unless you are removing
+# the whole spike — delete
 # deploy/phase0/secret.yaml's resource manually if so, it's gitignored
 # and won't be re-created by `oc apply -f deploy/phase0/`.
 
@@ -178,52 +206,29 @@ oc delete -f deploy/phase0/vllm-service.yaml --ignore-not-found
 
 ## SCC (Security Context Constraints)
 
-No SCC changes are anticipated. `oc get scc` confirms `restricted-v2`
-exists cluster-wide (the OpenShift 4.20 default); none of the manifests
-here request `privileged`, `hostPath`, `hostNetwork`, extra Linux
-capabilities, or a specific `runAsUser`/`fsGroup` — all deliberately
-left for OpenShift's default arbitrary-UID assignment rather than
-hardcoded.
-
-**One open, unverified risk** (flagged honestly rather than guessed
-around, since this task could not start a pod to check): `skopeo
-inspect` shows the `vllm-openai` image sets no `USER` (so it runs as
-root, UID 0, inside the container — this is normal for upstream
-non-Red-Hat images, not something specific to this pin). Under
-`restricted-v2`, OpenShift will still assign an arbitrary non-root UID
-at runtime regardless of what the image's default USER is — that part
-is standard and fine. What's *not* independently confirmed here is
-whether every directory the container needs to write to at runtime
-(model cache under `/models-cache` — our own emptyDir, should be fine;
-`/plugin-site` in the watermark pod — also our own emptyDir; anything
-*inside* the image itself vLLM might try to write to, e.g. under
-`/vllm-workspace`) is writable by an arbitrary non-root UID with primary
-GID 0, which is the convention Red Hat's own container images follow but
-upstream `vllm/vllm-openai` was not confirmed to follow. If the pod
-fails to start with a permission-denied error under `restricted-v2`
-(rather than sitting in the expected `/health`-not-ready state), that's
-the first thing to check — the fallback is the `anyuid` SCC (already
-present per `oc get scc`), granted to the `watermark` namespace's default
-service account with `oc adm policy add-scc-to-user anyuid -z default
--n watermark`, but that's a real privilege escalation and should not be
-reached for without first confirming it's actually needed.
+The Phase 0 and watermark pods reached Ready in the recorded runs after
+writable cache locations were configured (`EXECUTED`; [Phase 0
+record](../../EXPERIMENTS.md#2026-08-08--phase-0-baseline-serving--benchmark-executed),
+[corrected watermark run](../../EXPERIMENTS.md#2026-08-08--phase-1-corrected--phase-2-synthid-through-vllm-serve-closes-d8)).
+That does not establish a hardened reusable security context. A later
+server-side dry run emitted warnings for missing explicit
+`allowPrivilegeEscalation: false`, dropped capabilities, `runAsNonRoot`, and
+seccomp settings (`EXECUTED`; [warning transcript](../../EXPERIMENTS.md#2026-08-08--independent-post-push-review-correction)).
+The later Phase 4 ServingRuntime manifest explicitly sets the restricted-profile
+container fields (`STATIC`; `deploy/phase4/20-watermark-vllm-servingruntime.yaml`),
+but that does not retrofit these historical Phase 0 Pod manifests. Their reusable
+hardening remains `OPEN`; do not grant a broader SCC as a default workaround
+([adversarial finding](../../ADVERSARIAL_REVIEW.md#3-podsecurity-hardening-is-incomplete--high-for-reusable-deployment)).
 
 ## Resource-sizing note
 
-g5.xlarge allocatable (read from the live node,
-`oc get node <gpu-node> -o json .status.allocatable`): `cpu: 3500m`,
-`memory: 15031468Ki` (~14.65Gi), `nvidia.com/gpu: 1`. Both vLLM pods
-request `cpu: "3"` and a `memory` limit of `12Gi` *plus* a `medium:
-Memory` `/dev/shm` `sizeLimit` of `2Gi` (which counts toward the pod's
-memory cgroup, per the task brief) — worst case `14Gi` against `~14.65Gi`
-allocatable, leaving only ~0.65Gi headroom for node-local system pods
-(NVIDIA device plugin, dcgm-exporter, etc., all visible in the node's
-`nvidia.com/gpu.deploy.*` labels). This was sized exactly per the task
-brief's numbers, not independently re-derived; if node-local system pods
-get evicted/starved in practice, tighten the vLLM pod's memory limit
-first before touching anything else.
+The pod requests and limits are defined in the manifests (`STATIC`;
+[`vllm-baseline-pod.yaml`](vllm-baseline-pod.yaml) and
+[`vllm-watermark-pod.yaml`](vllm-watermark-pod.yaml)). No validated memory-
+headroom calculation is registered; capacity and eviction behavior remain
+`OPEN` for a reusable RHOAI deployment.
 
-## Image digest verification (evidence)
+## Image digest evidence
 
 ```
 $ curl -s https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/v0.18.0
@@ -231,10 +236,8 @@ $ curl -s https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/v0.18.0
    sha256:c32358ebfc115d56ade2acfdbcd00df5b115417dbd6006547c88f07e2b39de06
    images: [amd64 sha256:96c7e88811a07030f27bc44cd71b9007258a15f130cfec2bb4ab057512238b05,
             arm64 sha256:be723f3fa62508d6be28295d86de4aec9791e275474b82ed4697479242948e4d]
-
-$ skopeo inspect --config docker://vllm/vllm-openai@sha256:96c7e88811a07030f27bc44cd71b9007258a15f130cfec2bb4ab057512238b05
--> Entrypoint: ["vllm", "serve"], Cmd: null, WorkingDir: /vllm-workspace,
-   base: Ubuntu 22.04, User: (unset/root)
 ```
 
-`v0.18.0` exists as a tag — no fallback-tag search was needed.
+The registry lookup and deployed manifest-list digest are preserved in the
+Phase 0 log (`OFFICIAL-SRC` for the registry response; `EXECUTED` for the
+deployment pin; [source](../../EXPERIMENTS.md#2026-08-08--phase-0-infrastructure-bring-up-ocp-ai-cluster)).

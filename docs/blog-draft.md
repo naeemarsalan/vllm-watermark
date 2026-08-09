@@ -1,8 +1,8 @@
 # Mark, detect, repeat: What we learned watermarking text with vLLM
 
-*We added two text-watermarking schemes to vLLM, ran them on OpenShift, and measured what worked, what slowed down, and what is still open.*
+*We built a custom plugin providing two text-watermarking schemes for vLLM, ran it on OpenShift, and measured what worked, what slowed down, and what is still open.*[^scope]
 
-> **Before you try this:** This is a custom proof of concept, not a Red Hat product feature. We have not established product support for this deployment pattern, so do not treat it as a supported Red Hat method. We tested it with upstream vLLM in a bare OpenShift pod, not through a Red Hat OpenShift AI ServingRuntime. It is engineering research, not legal advice or proof of compliance.[^scope]
+> **Before you try this:** This is a custom proof of concept, not a Red Hat product feature. We have not established product support for this deployment pattern, so do not treat it as a supported Red Hat method. We tested both the earlier bare-OpenShift path and the scoped internal Red Hat OpenShift AI ServingRuntime/managed-guardrails path; external KServe/Istio pass-through and production hardening remain open. It is engineering research, not legal advice or proof of compliance.[^scope]
 
 The question looked simple: can we put a watermark on an LLM response?
 
@@ -14,9 +14,9 @@ We wanted to know whether that could work through vLLM, what it would look like 
 
 ## Why this matters now
 
-Article 50 of the EU AI Act has applied since 2 August 2026. Article 50(2) says that covered outputs must be “marked in a machine-readable format and detectable as artificially generated or manipulated.” A separate transition provision gives certain systems “placed on the market before 2 August 2026” until 2 December 2026 to take the necessary steps. Whether that wording covers an internal-only deployment is a question for counsel, not something an engineering team should guess.[^law]
+Article 113 says, “It shall apply from 2 August 2026.” Article 50(2) says providers “shall ensure that the outputs of the AI system are marked in a machine-readable format and detectable as artificially generated or manipulated.” Article 111(4) says providers of the named systems “placed on the market before 2 August 2026” must take the necessary Article 50(2) steps “by 2 December 2026.” Application of that text to an internal-only deployment remains `OPEN` for counsel.[^law]
 
-The Commission's voluntary Code of Practice gives signatories a more specific route for free-form text. For free-form text longer than 200 tokens, it says “watermarking still needs to be applied.” The Commission's Guidelines also say that marking “without the means for their detection being available” will not suffice. That 200-token threshold comes from the Code, not from the wording of Article 50 itself.[^code]
+The Commission's voluntary Code of Practice says, “For free-form text longer than 200 tokens, watermarking still needs to be applied.” The Commission's Guidelines say that marking “without the means for their detection being available” “will not suffice.” The 200-token sentence is Code text, not an Article 50 quotation.[^code]
 
 So this is not just a generation problem. If we can add a signal but cannot find it reliably, operate the detector, or explain the result, we have only built half of the system.
 
@@ -47,7 +47,7 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct \
   --gpu-memory-utilization 0.90
 ```
 
-We set watermarking on by default for the serving deployment. A request can still choose the scheme and key ID through the standard OpenAI-compatible API:
+We set watermarking on by default for the serving deployment. A request can still choose the scheme and key ID through vLLM's `vllm_xargs` extension on its OpenAI-compatible endpoint:[^request]
 
 ```json
 {
@@ -111,21 +111,21 @@ We kept the detector as a separate service. It does not need a running vLLM engi
 
 We deployed KGW and SynthID detector instances on OpenShift and routed requests through the FMS Guardrails Orchestrator. Known watermarked samples went to the correct detector. Cross-scheme checks, unwatermarked model output, and human text returned no detection. The direct endpoint also produced an Ed25519-signed result; the signature verified, and a tampered payload failed verification.[^detection]
 
-The FMS test proved that we could wire the detector through a guardrails orchestrator. But Red Hat OpenShift AI 3.4 now labels FMS Guardrails as legacy and points users toward NeMo Guardrails, so we would not choose FMS as the starting point for a new long-term design.[^support]
+The FMS test established the recorded success path through that standalone orchestrator. But Red Hat OpenShift AI 3.4 now labels FMS Guardrails as legacy and points users toward NeMo Guardrails, so this result is not evidence for a new long-term RHOAI design.[^support]
 
-For the newer direction, we called the same detector from a custom rail in the upstream NeMo Guardrails library. On that request path, the rail blocked a known KGW sample, passed a human sample, and failed closed when the detector was unavailable or returned a malformed response.[^detection]
+For the newer direction, we first called the same detector from a custom rail in the upstream NeMo Guardrails library. On that historical request path, the rail blocked a known KGW sample, passed a human sample, and failed closed on the two malformed-response cases preserved in the run log.[^detection]
 
-That NeMo test used the upstream library. It did not run through the RHOAI-managed `NemoGuardrails` custom resource, so that product integration remains open.[^detection]
+We then executed the current RHOAI-managed `NemoGuardrails` path. A synchronous validation gateway selected every `N`th completed response, sent bounded correlation metadata through the managed action to an authenticated broker, and kept the exact pending response inside the gateway for detector authority. The fixed runs selected 20/20 responses at `N=1` and 20/100 at `N=5`; both KGW and SynthID positive cases mapped to the managed block action, clean controls passed, and a real detector outage exhausted three attempts before a content-free fail-closed response.[^continuous]
 
-A later negative test found another production gap: the detector currently accepts some invalid numeric settings at startup. A `NaN` detection threshold can pass readiness while causing every threshold comparison to return false. The successful live results used valid settings, but the service still needs fail-fast configuration checks, a rebuilt image, and a repeat of the live verdict matrix before production use.[^detector-config]
+A later negative probe found another production gap: `load_settings()` accepted four invalid numeric configurations, including a `NaN` threshold (`EXECUTED`). The first remediation rejected those values but still lacked several upper bounds; a later review also found an explicit-blank vocabulary bypass. The current detector validates blank, lower, upper, and non-finite settings through lifespan; its immutable image matched local source, passed every built-image blank/maximum/overflow probe, failed a controlled blank-valued rollout before readiness, recovered, and then completed the full generated-response D10 matrix (`EXECUTED`). Request/cache limits and generation-side bound parity remain open.[^detector-config]
 
 ## Where Red Hat helps, and where it does not
 
 RHOAI 3.4 includes a vLLM version with the V1 custom logits-processor interface. OpenShift let us store the key in a Secret, pin the serving image, roll out generation and detection separately, check service health, and rerun the tests in a controlled environment.[^red-hat]
 
-That does not make this plugin a supported Red Hat feature. The watermark code, detector, manifests, and benchmark harness are custom. We have not yet run the generation path through an RHOAI ServingRuntime or verified that `vllm_xargs` survives the complete KServe and gateway path. Red Hat's own EU AI Act page also draws a useful boundary: the customer's AI application may be classified under the Act; the underlying platform is not represented as “EU AI Act certified.”[^support]
+That does not make this plugin a supported Red Hat feature. The watermark code, detector, validation gateway, manifests, and benchmark harness are custom. The internal RHOAI ServingRuntime/predictor and managed-guardrails path executed, but the external KServe/Istio pass-through remains untested. Red Hat's own EU AI Act page also draws a useful boundary: the customer's AI application may be classified under the Act; the underlying platform is not represented as “EU AI Act certified.”[^support]
 
-That is the useful boundary. OpenShift can run and repeat the controls. It does not decide the legal scope, choose the detection threshold, or turn experimental code into a supported compliance feature.
+That is the useful boundary. The recorded OpenShift environment hosted and repeated these controls. The platform result does not decide legal scope, choose a detection threshold, or turn experimental code into a supported compliance feature.[^scope]
 
 ## How we keep checking it
 
@@ -144,11 +144,11 @@ The double-loading bug is the best argument for this loop. The code ran. The det
 
 ## Where we are now
 
-We have a working proof of concept: two watermark schemes generating through vLLM, independent detection, per-request controls, measured performance, and detector requests routed through a guardrails service on OpenShift.[^scope][^detection]
+We have a working proof of concept: two watermark schemes generating through vLLM, independent detection, per-request controls, measured performance, and configurable one-in-`N` validation through the scoped internal RHOAI managed-guardrails path.[^scope][^continuous]
 
-We do not yet have a production solution. The RHOAI ServingRuntime path remains untested. Key generation, rotation, application scoping, and compromise handling need a proper design. Quality needs a real evaluation. Paraphrasing and translation need robustness tests. Tensor parallelism and larger models need their own runs.[^limitations][^support]
+We do not yet have a production solution. External gateway pass-through, caller authentication/network policy, multi-replica and streaming behavior, HA, and platform-wide retention remain untested. Key generation, rotation, application scoping, and compromise handling need a proper design. Quality needs a real evaluation. Paraphrasing and translation need robustness tests. Tensor parallelism and larger models need their own runs.[^limitations][^support]
 
-So, can vLLM carry a machine-detectable text watermark? Under the conditions we tested, yes. Can OpenShift give us a practical place to deploy, measure, and continuously verify it? Yes.[^scope]
+So, can vLLM carry a machine-detectable text watermark? Under the recorded model and configuration, yes. Did the scoped internal RHOAI serving and managed-validation path execute? Yes. Does that prove an externally exposed, supported, production-ready design? No.[^scope][^support]
 
 That is where we stop the claim. Calling the system compliant or supported would require the full technical evidence, the actual deployment context, Red Hat support guidance, and counsel.[^support]
 
@@ -158,20 +158,19 @@ The implementation, manifests, tests, and append-only experiment record are avai
 
 ## Sources and verification notes
 
-[^scope]: `EXECUTED` (bare-OpenShift proof) / `OPEN` (RHOAI serving and supportability) — [facts C4, C8, C9, C10, D1, D5, and D6](facts.md), [experiment record](../EXPERIMENTS.md), and [Red Hat's Container Support Policy](https://access.redhat.com/articles/2726611).
+[^scope]: `EXECUTED` (bare OpenShift and scoped internal RHOAI paths) / `OPEN` (external gateway and supportability) — [facts C4, C8, C9, C10, D1, D5, D6, and D10](facts.md), [current execution record](../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted), and [Red Hat's Container Support Policy](https://access.redhat.com/articles/2726611).
 [^law]: `OJ-VERBATIM` / `OPEN` (internal-only transition applicability) — [facts A1–A4 and verified quotations](quotes.md), [Regulation (EU) 2024/1689](https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689), and [Regulation (EU) 2026/1744](https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32026R1744).
 [^code]: `OJ-VERBATIM` — [facts A7, A9, and A10](facts.md), the Commission's [Code of Practice on Transparency of AI-Generated Content](https://ec.europa.eu/newsroom/dae/redirection/document/129555), and the [Article 50 Guidelines](https://ec.europa.eu/newsroom/dae/redirection/document/131215).
-[^mechanism]: `OFFICIAL-SRC` / `STATIC` / `EXECUTED` — [facts B13–B15](facts.md), [technical explanation](technical.md), and the executed [CPU mechanism proof](../research/demo/results.md).
+[^mechanism]: `OFFICIAL-SRC` / `STATIC` / `EXECUTED` — [facts B13, B15, D1, and D8](facts.md), the [technical explanation](technical.md), and the recorded [Phase 1/2 serving evidence](../EXPERIMENTS.md#2026-08-08--phase-1-corrected--phase-2-synthid-through-vllm-serve-closes-d8). The historical CPU report is `OPEN` under B14.
 [^architecture]: `OFFICIAL-SRC` / `STATIC` — [facts B3–B4](facts.md), [vLLM custom logits-processor documentation](https://docs.vllm.ai/en/latest/features/custom_logitsprocs/), and the implemented [KGW](../src/vllm_watermark/kgw/processor.py) and [SynthID](../src/vllm_watermark/synthid/processor.py) processors.
 [^request]: `EXECUTED` — [fact D1](facts.md) and the [Phase 1 per-request validation record](../EXPERIMENTS.md#per-request-control--validation-executed).
-[^double-load]: `EXECUTED` — [vLLM API note and independent reproduction](api-notes-vllm-v0.18.0.md#8-plugin-loading-has-no-deduplication--entry-points--fqcn-flag-double-load-executed), [Phase 1 correction](../EXPERIMENTS.md#2026-08-08--correction-phase-1-ran-two-kgw-processor-instances-effective-delta-40), and [fact D1](facts.md).
+[^double-load]: `EXECUTED` — [vLLM API note and independent reproduction](api-notes-vllm-v0.18.0.md#10-plugin-loading-has-no-deduplication--entry-points--fqcn-flag-double-load), [Phase 1 correction](../EXPERIMENTS.md#2026-08-08--correction-phase-1-ran-two-kgw-processor-instances-effective-delta-40), and [fact D1](facts.md).
 [^results]: `EXECUTED` — [scheme-comparison v2](../EXPERIMENTS.md#2026-08-08--scheme-comparison-v2-per-scheme-control-fpr-supersedes-the-v1-tables-control-rows), [facts D1 and D8](facts.md).
 [^performance]: `EXECUTED` — [fact D2](facts.md) and the corrected [Phase 1/2 performance record](../EXPERIMENTS.md#2026-08-08--phase-1-corrected--phase-2-synthid-through-vllm-serve-closes-d8).
 [^limitations]: `EXECUTED` / `CORROBORATED` / `OPEN` — [facts B7, B10, B17, B18, B23, D2–D4, and D9](facts.md).
-[^detection]: `EXECUTED` / `OPEN` (detector startup validation) — [facts B23, D5, and D9](facts.md), the [Phase 3 experiment](../EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half), and the [NeMo hardening transcript](../EXPERIMENTS.md#2026-08-08--nemo-poc-hardening-evidence-full-transcript-fresh-pod-pass).
-[^detector-config]: `EXECUTED` (negative probe) / `OPEN` (fix and redeployment) — [facts B23 and D9](facts.md) and the [post-push review correction](../EXPERIMENTS.md#2026-08-08--independent-post-push-review-correction).
-[^red-hat]: `OFFICIAL-SRC` / `STATIC` / `EXECUTED` — [facts C1–C3, C9, C10, D1, and D5](facts.md), the [experiment record](../EXPERIMENTS.md), [RHOAI supported configurations](https://access.redhat.com/articles/rhoai-supported-configs-3.x), and [OpenShift AI model-serving configuration](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html-single/configuring_your_model-serving_platform/configuring_your_model-serving_platform).
+[^detection]: `EXECUTED` — [facts B23, D5, and D9](facts.md), the [Phase 3 experiment](../EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half), and the [current managed-path evidence](../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted).
+[^continuous]: `EXECUTED` (single-replica synchronous non-streaming PoC scope) / `OPEN` (production boundaries) — [fact D10](facts.md), the [acceptance contract](implementation.md#continuous-validation-acceptance), and the [current execution record](../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted).
+[^detector-config]: `EXECUTED` / `OPEN` (negative probe, rebuilds, current blank/bound/startup probes and matrix rerun, and remaining hardening) — [facts B23, D9, and D10](facts.md), the [original negative probe](../EXPERIMENTS.md#2026-08-08--independent-post-push-review-correction), the [current detector reconciliation](../EXPERIMENTS.md#current-detector-reconciliation-2026-08-09), and the [current build-5 D10 rerun](../EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09).
+[^red-hat]: `OFFICIAL-SRC` / `STATIC` / `EXECUTED` — [facts C1–C3, C8–C10, D1, D5, and D10](facts.md), the [current execution record](../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted), [RHOAI supported configurations](https://access.redhat.com/articles/rhoai-supported-configs-3.x), and [OpenShift AI model-serving configuration](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html-single/configuring_your_model-serving_platform/configuring_your_model-serving_platform).
 [^support]: `OFFICIAL-SRC` / `OPEN` — [facts C4, C8, C10, C11, and D5–D6](facts.md), [Red Hat's EU AI Act page](https://access.redhat.com/compliance/eu-ai-act), and [RHOAI 3.4 Guardrails documentation](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/enabling_ai_safety_with_guardrails/enabling-ai-safety-with-guardrails_safety).
 [^verification]: `STATIC` (method) / `EXECUTED` (recorded runs and corrections) — [implementation phases](implementation.md), [fact register](facts.md), and [append-only experiment record](../EXPERIMENTS.md).
-
-<!-- Before external publication, replace relative repository links with public GitHub URLs. -->

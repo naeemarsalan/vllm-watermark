@@ -1,22 +1,30 @@
-# Phase 3 — detector service + standalone FMS Guardrails Orchestrator
+# Phase 3 — detector service, standalone FMS, and upstream NeMo PoC
 
 Manifests in this directory stand up (1) the watermark detector service as a
 built-on-cluster image (`detector-build.yaml`, `detector-deploy.yaml`) and
 (2) a **standalone** (not RHOAI-managed) FMS Guardrails Orchestrator wired
 to it in detection-only mode (`orchestrator.yaml`), on plain OpenShift 4.20
-(`ocp-ai`) with **no RHOAI installed**. The RHOAI-managed Guardrails flavor
-(operator-installed, dashboard-configured) is Phase 4
-(`docs/implementation.md`) — this phase deploys the upstream
-`foundation-model-stack/fms-guardrails-orchestrator` project directly.
+(`ocp-ai`) with **no RHOAI installed**. This is the executed legacy FMS
+path, not a recommended future RHOAI architecture (`EXECUTED` /
+`OFFICIAL-SRC`; [facts C11/D5](../../docs/facts.md)). A separate committed
+configuration exercised an upstream `nemoguardrails==0.23.0` custom action
+(`EXECUTED`; [NeMo hardening transcript in the append-only evidence log](../../EXPERIMENTS.md)).
+The historical Phase 3 run did not cover the RHOAI-managed `NemoGuardrails` CR,
+shipped version, or managed retention behavior. Those were exercised later in
+the current internal metadata-only broker path (`EXECUTED`; [current Phase
+4/D10 evidence](../../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)).
+External KServe/Istio pass-through, supportability, and platform-wide retention
+remain `OPEN` (same evidence; facts C8/D6/D10).
 
-The runbook was executed on the cluster on 2026-08-08. Every `oc`/`curl`/
-`skopeo`/`gh api` command supporting the execution claims is recorded in
-`EXPERIMENTS.md`; the manifests below remain the reproducible deployment
-source.
+The FMS build, deployment, health checks, and verdict matrix were executed
+on 2026-08-08. Preserved raw outcomes and corrections are in
+[`EXPERIMENTS.md`](../../EXPERIMENTS.md); this runbook is the reusable command
+path and is not evidence by itself (`EXECUTED`; [Phase 3 evidence](../../EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half)).
 
 CPU-only throughout (tokenizer + torch CPU scoring for the detector; a
-stateless Rust HTTP proxy for the orchestrator) — **no GPU node needed**,
-unlike `deploy/phase0`/`deploy/phase1`. Don't run `scripts/scale-gpu.sh 1`
+stateless Rust HTTP proxy for the orchestrator) — **no GPU node needed** in
+the recorded Phase 3 configuration (`EXECUTED`; run log), unlike generation
+workloads in `deploy/phase0`. Do not run `scripts/scale-gpu.sh 1`
 for this phase.
 
 ## Prerequisites
@@ -31,14 +39,46 @@ export KUBECONFIG=cluster/auth/kubeconfig   # repo-root relative; gitignored, ne
   own comment).
 - **Watermark key Secret**: this phase reuses the EXISTING `watermark-key`
   Secret from `deploy/phase0/secret-template.yaml` → `secret.yaml`
-  (gitignored). If Phase 0/1 already ran on this cluster, it's already
+  (gitignored). If Phases 0–2 already ran on this cluster, it may already be
   there; if not, follow `deploy/phase0/README.md` §1 to create it before
   continuing (`detector-deploy.yaml`'s env references it by name and will
   sit `CreateContainerConfigError` without it).
+- **Detector signing Secret**: both detector Deployments require
+  `detector-signing-key` (`STATIC`; manifests). Create it before deploying
+  §4 only if it does not already exist, using a key file outside the
+  repository. This example reuses an existing Secret and otherwise creates
+  one without printing the private key:
+
+  ```bash
+  if oc -n watermark get secret detector-signing-key >/dev/null 2>&1; then
+    echo 'detector-signing-key already exists; reusing it'
+  else
+    (
+      set -euo pipefail
+      umask 077
+      signing_key_path=$(mktemp /tmp/vllm-watermark-signing.XXXXXX.pem)
+      trap 'rm -f -- "$signing_key_path"' EXIT
+      trap 'exit 130' HUP INT TERM
+      read -r -p 'Signing key ID: ' signing_key_id
+      test -n "$signing_key_id"
+      openssl genpkey -algorithm ed25519 -out "$signing_key_path"
+      oc -n watermark create secret generic detector-signing-key \
+        --from-file=signing.pem="$signing_key_path" \
+        --from-literal="SIGNING_KEY_ID=$signing_key_id" \
+        --dry-run=client -o yaml | oc apply -f -
+    )
+  fi
+  ```
+
+  Replacing that Secret changes the signing key and identifier consumed by
+  both Deployments (`STATIC`; manifests); rotation policy remains `OPEN`
+  under D4.
+  Key material must never be committed or logged
+  ([repository rules](../../AGENTS.md#3-secrets-and-safety)).
 - **`pyyaml`**: used below only to validate this directory's own YAML syntax
-  locally, not by anything that runs in-cluster. Already present on the
-  local workstation (`python3 -c "import yaml; print(yaml.__version__)"` →
-  `6.0.2` in the recorded environment — no `pip install` was needed).
+  locally, not by anything that runs in-cluster. Check availability with
+  `python3 -c "import yaml; print(yaml.__version__)"`; no version claim is
+  made by this runbook.
 
 ## 1. Build the wheel
 
@@ -50,46 +90,57 @@ export KUBECONFIG=cluster/auth/kubeconfig   # repo-root relative; gitignored, ne
 
 ## 2. Build context safety — read before running `oc start-build`
 
-`detector/Dockerfile` needs both `dist/*.whl` and `detector/` in its build
-context, so the context can't just be the `detector/` directory alone. The
-task brief's suggested command was `oc start-build detector --from-dir=.`
-(repo root) — **this task deliberately does not recommend that literally**,
-for a concrete reason: the repo root also contains `cluster/`, a **gitignored
-directory holding live OpenShift credentials** (kubeconfig, kubeadmin
-password, installer TLS material — see repo-root `.gitignore` and
-`AGENTS.md` §3, "never commit, print, echo, or paste their contents").
-`oc start-build --from-dir=DIR` archives and streams the literal contents of
-`DIR` from the local filesystem (per OpenShift 4.20 docs,
-`modules/builds-binary-source.adoc`, fetched from `openshift/openshift-docs`
-branch `enterprise-4.20` since `docs.redhat.com` itself returned HTTP 403 to
-every fetch attempt from this environment) — nothing in the fetched docs
-confirms that step is filtered by `.dockerignore` the way a local `docker
-build`'s context-collection step is. Rather than gamble live credentials on
-an unconfirmed detail, stage a directory containing only what the Dockerfile
-actually needs and point `--from-dir` at that instead:
+`detector/Dockerfile` needs three files under `detector/` plus the single built
+wheel under `dist/`. Never submit the repository root: it also contains
+gitignored live-credential locations that must not enter a build context
+([repository rules](../../AGENTS.md#3-secrets-and-safety)). The current executed
+build used the exact four-file allow-list below (`EXECUTED`; [current detector
+reconciliation](../../EXPERIMENTS.md#current-detector-reconciliation-2026-08-09)):
 
 ```bash
-rm -rf /tmp/detector-build-ctx
-mkdir -p /tmp/detector-build-ctx/dist
-cp -r detector /tmp/detector-build-ctx/detector
-cp dist/vllm_watermark-*.whl /tmp/detector-build-ctx/dist/
-# Sanity check: this must NOT print anything under cluster/, research/, aws, etc.
-find /tmp/detector-build-ctx -type f
+prepare_detector_build_context() {
+  local candidate
+  local -a detector_wheels
+  candidate=$(mktemp -d /tmp/vllm-watermark-detector-build.XXXXXX) || return 1
+  if [[ ! "$candidate" =~ ^/tmp/vllm-watermark-detector-build\.[[:alnum:]]{6}$ ]] ||
+     [[ ! -d "$candidate" ]]; then
+    echo 'mktemp returned an unexpected build-context path; refusing to continue' >&2
+    return 1
+  fi
+  mapfile -t detector_wheels < <(find dist -maxdepth 1 -type f \
+    -name 'vllm_watermark-*.whl' -print)
+  if [[ ${#detector_wheels[@]} -ne 1 ]] ||
+     ! mkdir -p "$candidate/detector" "$candidate/dist" ||
+     ! cp -- detector/Dockerfile detector/app.py detector/requirements.txt \
+       "$candidate/detector/" ||
+     ! cp -- "${detector_wheels[0]}" "$candidate/dist/"; then
+    rm -rf -- "$candidate"
+    return 1
+  fi
+  VLLM_WATERMARK_DETECTOR_BUILD_CONTEXT=$candidate
+  export VLLM_WATERMARK_DETECTOR_BUILD_CONTEXT
+}
+
+if prepare_detector_build_context; then
+  # Sanity check: this must print exactly the four allow-listed files above.
+  find "$VLLM_WATERMARK_DETECTOR_BUILD_CONTEXT" -type f
+else
+  unset VLLM_WATERMARK_DETECTOR_BUILD_CONTEXT
+  echo 'build-context preparation failed; do not run oc start-build' >&2
+fi
+unset -f prepare_detector_build_context
 ```
 
-A repo-root `.dockerignore` (`cluster/`, `research/`, `benchmarks/data/`,
-`benchmarks/results/`, `.git/`, `gpu/`, `*.pem`, `*.key`, `aws`) is also
-provided as defense in depth for anyone who instead runs a plain local
-`docker build` / `podman build -f detector/Dockerfile .` from the repo root
-(that path DOES honor `.dockerignore`, per standard docker/podman/Buildah
-semantics — see that file's own header comment) — it is not what the
-`oc start-build` step below relies on for safety.
+The repo-root `.dockerignore` is defense in depth for other build tools; this
+binary-build procedure relies on the staged allow list, not on assumed ignore
+behavior (`STATIC`; `.dockerignore` and commands above).
 
 ## 3. Create the ImageStream + BuildConfig, then build
 
 ```bash
 oc apply -f deploy/phase3/detector-build.yaml
-oc -n watermark start-build detector --from-dir=/tmp/detector-build-ctx --follow
+oc -n watermark start-build detector \
+  --from-dir="$VLLM_WATERMARK_DETECTOR_BUILD_CONTEXT" --follow
 ```
 
 Watch for `Push successful` at the end of the follow output, then confirm
@@ -117,7 +168,7 @@ built image automatically once step 3's build completes and updates the
 `ImagePullBackOff` on the placeholder pull spec until the trigger fires),
 but doing step 3 first, as ordered above, avoids that transient state.
 
-Sanity-check the plugin loaded and the key is configured:
+Sanity-check that the detector loaded its tokenizer and key configuration:
 
 ```bash
 oc -n watermark port-forward svc/detector 8000:8000 &
@@ -128,6 +179,18 @@ curl -s http://localhost:8000/ready
 #    (503 with tokenizer_loaded/keys_configured booleans if not yet ready —
 #    see detector-deploy.yaml's readinessProbe comment for expected timing)
 ```
+
+The `/ready` handler checks tokenizer/default-key availability, while lifespan
+validates detector numeric configuration before the route can be served
+(`STATIC`; `detector/app.py`). The B23 probe showed an earlier revision
+accepting NaN/out-of-domain values, and a later review found missing upper
+bounds and then an explicit-blank vocabulary bypass after the first remediation.
+The current immutable image matched local source, rejected both blank forms,
+passed all nine built-image maximum/overflow pairs, failed a controlled
+blank-valued rollout before readiness, recovered, and answered both scheme API
+smoke requests (`EXECUTED`; [current detector reconciliation](../../EXPERIMENTS.md#current-detector-reconciliation-2026-08-09)).
+The full generated-response D10 matrix subsequently reran through this detector
+digest (`EXECUTED`; [current build-5 D10 rerun](../../EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09)).
 
 ## 5. Deploy the orchestrator
 
@@ -154,11 +217,15 @@ Scheme routing is SERVER-SIDE: `watermark-kgw` routes to the kgw-scheme
 `detector` Deployment and `watermark-synthid` to the dedicated
 `detector-synthid` Deployment (each pins `WATERMARK_DETECTOR_SCHEME`), so
 **both detector ids return correct verdicts with empty `detector_params`**
-— verified live 2026-08-08, full matrix in `EXPERIMENTS.md`.
-`detector_params.scheme` remains an optional per-request override (the
-orchestrator forwards non-`threshold` params verbatim). Background: the
-pinned orchestrator image predates `path_prefix` routing, which is exactly
-why the twin-Deployment design exists — see `orchestrator.yaml`'s header.
+(`EXECUTED`; [raw matrix](../../EXPERIMENTS.md#raw-evidence-phase-3-verdict-matrix-signing-retention-health-fresh-re-run)).
+The Phase 3 narrative reports that deployed 0.16.0 forwarded a
+`detector_params.scheme` override, but its command and raw response were not
+preserved, so that specific probe remains `OPEN`
+([Phase 3 narrative](../../EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half)).
+The 0.18.3 source forwards parameters other than `threshold` (`STATIC`;
+[API note](../../docs/api-notes-trustyai-detectors.md)). Acceptance uses empty
+parameters, so the twin-Deployment design does not depend on either
+client-controlled behavior; see `orchestrator.yaml`'s header.
 
 ### (a) Direct detector endpoint — `/v1/watermark/detect`
 
@@ -177,35 +244,24 @@ curl -s http://localhost:8000/v1/watermark/detect \
   -d '{"text": "<paste a known-watermarked KGW sample here>", "scheme": "kgw"}'
 ```
 
-Expected shape (fields per `detector/app.py::_build_detect_result`).
-BOTH committed Deployments now set `SIGNING_KEY_PATH` from Secret
-`detector-signing-key` (create it FIRST or the pod fails loudly at startup —
-deliberate; see the manifest comment):
-
-```bash
-umask 077
-openssl genpkey -algorithm ed25519 -out signing.pem      # keep OUTSIDE git
-oc -n watermark create secret generic detector-signing-key \
-  --from-file=signing.pem=signing.pem \
-  --from-literal=SIGNING_KEY_ID=<your-key-id>            # id rotates WITH the key
-```
-
-Example below is the actually-captured response for a known-KGW sample
-(EXPERIMENTS.md raw-evidence addendum, 2026-08-08), signature truncated:
+Both committed Deployments read `SIGNING_KEY_PATH` and `SIGNING_KEY_ID` from
+the prerequisite signing Secret (`STATIC`; manifests). The following fields
+and values come from the preserved single-instance KGW direct response
+(`EXECUTED`; [raw capture](../../EXPERIMENTS.md#raw-evidence-phase-3-verdict-matrix-signing-retention-health-fresh-re-run)); the detached JWS is elided:
 
 ```json
 {
   "scheme": "kgw",
-  "key_id": "<your key_id>",
+  "key_id": "poc-2026-08",
   "verdict": true,
-  "z_score": 12.817175976009691,
-  "p_value": 6.569985692499835e-38,
-  "score": 1.0,
-  "num_tokens_scored": 400,
+  "z_score": 6.400354600105544,
+  "p_value": 7.750825489048927e-11,
+  "score": 0.9999999999224918,
+  "num_tokens_scored": 188,
   "detector_version": "vllm-watermark-detector/0.1.0.dev0",
   "model_tokenizer": "Qwen/Qwen2.5-0.5B-Instruct",
-  "scheme_details": {"num_green": 211, "gamma": 0.25},
-  "signature": "eyJhbGciOiJFZERTQSIsImI2NCI6ZmFsc2UsImNy…",
+  "scheme_details": {"num_green": 85, "gamma": 0.25},
+  "signature": "<detached Ed25519 JWS elided>",
   "signing": "enabled"
 }
 ```
@@ -215,9 +271,8 @@ Example below is the actually-captured response for a known-KGW sample
 Port-forward `svc/orchestrator` on its main port too:
 `oc -n watermark port-forward svc/orchestrator 8033:8033 &`
 
-**KGW** (matches the task brief's literal example — empty `detector_params`
-works here because the detector's `WATERMARK_DETECTOR_SCHEME` env default is
-`kgw`, see detector-deploy.yaml):
+**KGW** (empty `detector_params`; the dedicated Deployment pins the KGW
+scheme):
 
 ```bash
 curl -s http://localhost:8033/api/v2/text/detection/content \
@@ -240,30 +295,29 @@ curl -s http://localhost:8033/api/v2/text/detection/content \
       }'
 ```
 
-Expected shape when a detection fires (`ContentAnalysisResponse`, per
-`src/clients/detector.rs` at the pinned image's `0.17.0` vintage — field
-names verified by reading that struct's `Deserialize` derive, not the task
-brief's prose):
+The deployed 0.16.0 orchestrator returned this response shape
+(`EXECUTED`; same raw capture). Content is elided because the contract echoes
+detected text:
 
 ```json
 {
   "detections": [
     {
       "start": 0,
-      "end": 987,
-      "text": "<the submitted content, echoed back>",
+      "end": 1113,
+      "text": "<submitted content elided>",
       "detection": "kgw-watermark",
       "detection_type": "watermark",
       "detector_id": "watermark-kgw",
       "score": 1.0,
       "metadata": {
-        "z_score": 12.817175976009691,
-        "p_value": 6.569985692499835e-38,
-        "key_id": "<your key_id>",
+        "z_score": 6.400354600105544,
+        "p_value": 7.750825489048927e-11,
+        "key_id": "poc-2026-08",
         "scheme": "kgw",
-        "num_tokens_scored": 254,
+        "num_tokens_scored": 188,
         "detector_version": "vllm-watermark-detector/0.1.0.dev0",
-        "num_green": 210,
+        "num_green": 85,
         "gamma": 0.25
       }
     }
@@ -277,36 +331,74 @@ see `detector/app.py`'s docstring citation of the upstream
 `detectors/huggingface/detector.py` behavior it mirrors), so the orchestrator
 response for unwatermarked/human text is `{"detections": []}`, not an error.
 
-`ContentAnalysisResponse.detector_id` disambiguation was also executed: one
+`ContentAnalysisResponse.detector_id` disambiguation was also `EXECUTED`: one
 request naming both detectors returned only the matching detection with the
-correct detector id. The raw verdict matrix is in `EXPERIMENTS.md`.
+correct detector id ([raw matrix](../../EXPERIMENTS.md#raw-evidence-phase-3-verdict-matrix-signing-retention-health-fresh-re-run)).
 
-## 7. Teardown
+## 7. Upstream NeMo 0.23.0 PoC
+
+[`nemo-guardrails-poc.yaml`](nemo-guardrails-poc.yaml) contains the reusable
+upstream-library output rail, flow, and custom action; the resolved package
+set is pinned in [`nemo-poc-constraints.txt`](nemo-poc-constraints.txt)
+(`STATIC`; committed artifacts). It is not a RHOAI `NemoGuardrails` CR.
+
+The recorded fresh-pod run installed the 78 pinned packages with zero freeze
+differences, blocked a known KGW sample, passed a human sample through
+`POST /v1/checks`, blocked missing/non-boolean verdict responses, and kept
+five poisoned detector fields out of the captured process output
+(`EXECUTED`; [NeMo hardening transcript in the append-only evidence log](../../EXPERIMENTS.md)).
+The committed detector-outage branch is `STATIC`; this historical upstream-PoC
+run did not preserve a live outage command/raw output. The current managed
+path's real detector outage and fail-closed recovery were executed separately
+(`EXECUTED`; [current Phase 4/D10 evidence](../../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)).
+
+This PoC does not close RHOAI operator mounting, shipped-version, retention,
+or supportability questions (`OPEN`; C11/D5/D6). The upstream library's 422
+and event-log content-handling gaps also require mitigation before reuse; no
+zero-retention claim is made ([NeMo API note](../../docs/api-notes-nemo-guardrails.md)).
+
+## 8. Teardown
 
 ```bash
 oc -n watermark delete -f deploy/phase3/orchestrator.yaml --ignore-not-found
 oc -n watermark delete -f deploy/phase3/detector-synthid-deploy.yaml --ignore-not-found
 oc -n watermark delete -f deploy/phase3/detector-deploy.yaml --ignore-not-found
 oc -n watermark delete -f deploy/phase3/detector-build.yaml --ignore-not-found
-rm -rf /tmp/detector-build-ctx
+oc -n watermark delete -f deploy/phase3/nemo-guardrails-poc.yaml --ignore-not-found
+build_context=${VLLM_WATERMARK_DETECTOR_BUILD_CONTEXT:-}
+if [[ -z "$build_context" ]]; then
+  echo 'build-context variable is unset; no local directory removed'
+elif [[ "$build_context" =~ ^/tmp/vllm-watermark-detector-build\.[[:alnum:]]{6}$ ]] &&
+     [[ "$(dirname -- "$build_context")" == /tmp ]] &&
+     [[ -d "$build_context" ]]; then
+  rm -rf -- "$build_context"
+  unset VLLM_WATERMARK_DETECTOR_BUILD_CONTEXT
+else
+  echo 'refusing to remove an unexpected or missing build-context path' >&2
+fi
+unset build_context
 ```
 
-The `watermark` namespace and `watermark-key` Secret are left in place
-deliberately (shared with Phase 0/1, cheap, no billing impact) — see
-`deploy/phase0/README.md` §5 for the same convention. No GPU node was used
-by this phase, so there is nothing to scale down.
+These commands leave the `watermark` namespace, `watermark-key`, and
+`detector-signing-key` in place. Remove those Secrets explicitly when they
+are no longer required; never print their contents. No GPU node was used by
+the recorded Phase 3 work (`EXECUTED`; run log), so this runbook does not
+scale one down.
 
-## Acceptance evidence
+## Acceptance status
 
-The runbook above was executed end to end on the cluster on 2026-08-08 —
-build, deploys, orchestrator wiring, and the full verdict matrix
-(known-KGW and known-SynthID watermarked text detected by exactly their own
-detector ids with empty params; clean and human text negative on both;
-dual-detector requests attribute correctly). Raw transcripts and the exact
-commands live in `EXPERIMENTS.md` (Phase 3 entry and the raw-evidence
-addendum); this README carries no evidence of its own. Earlier revisions of
-this section described the pre-execution state — see git history for that
-provenance.
+The Phase 3 executable PoC scope is met: the standalone legacy FMS path and
+the upstream NeMo 0.23.0 path returned the recorded expected verdicts
+(`EXECUTED`; fact D5 and [`EXPERIMENTS.md`](../../EXPERIMENTS.md)). The later
+RHOAI-managed path/initial D10 matrix, subsequent D9 startup-validation rebuild,
+and current-image matrix rerun are recorded separately as scoped `EXECUTED`
+evidence ([current Phase 4/D10
+evidence](../../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted);
+[current detector reconciliation](../../EXPERIMENTS.md#current-detector-reconciliation-2026-08-09);
+[current build-5 D10 rerun](../../EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09)).
+External gateway/Istio pass-through, supportability, key lifecycle, and
+production hardening remain `OPEN` (same evidence; facts C4/C8/D4/D6/D10). This
+runbook itself does not establish RHOAI completion or production readiness.
 
 ## YAML validation
 

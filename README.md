@@ -1,42 +1,71 @@
 # vllm-watermark
 
-**EU AI Act Article 50(2) text watermarking for vLLM on OpenShift AI — verified research and implementation workspace.**
+**Evidence-tracked text-watermarking proof of concept for vLLM on OpenShift, with EU AI Act Article 50(2) research.**
 
-Goal: a decode-time text watermarking implementation (generation **and** detection) for LLMs served by vLLM on OpenShift AI, addressing the EU AI Act's machine-readable marking obligation for AI-generated text. The research base carries mixed verification tags in [`docs/facts.md`](docs/facts.md). As of 2026-08-08, KGW and SynthID-Text watermarking are `EXECUTED` end to end through `vllm serve` on the cluster (fact D1 closed; corrected single-instance statistics after the double-load finding — see the correction entry), and the watermark detector service is validated end to end through the FMS Guardrails Orchestrator, all with evidence in [`EXPERIMENTS.md`](EXPERIMENTS.md).
+Goal: a decode-time text watermarking implementation (generation **and** detection) for LLMs served by vLLM on OpenShift AI, alongside research on the exact Article 50 marking text quoted in this repository. The research base carries mixed verification tags in [`docs/facts.md`](docs/facts.md). As of 2026-08-09, KGW and SynthID-Text ran end to end through `vllm serve`; the detector ran through standalone FMS; and the current RHOAI ServingRuntime/InferenceService/internal predictor → validation gateway → managed NeMo → authenticated broker → detector path completed the exact one-in-`N` acceptance matrix (`EXECUTED`, scoped; facts C8/D5/D9/D10; [current evidence](EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)).
 
 > This repo contains regulatory analysis but is **not legal advice**. Compliance decisions must go through counsel.
+
+## Delivery target
+
+The destination is watermark-enabled vLLM deployed through an actual OpenShift
+AI ServingRuntime/InferenceService path, with selected generated responses
+validated by the TrustyAI-compatible detector through the current RHOAI-managed
+guardrails path. The internal predictor and current metadata-only managed
+broker/detector path are executed, including configurable one-in-`N` selection.
+External KServe gateway/Istio pass-through, supportability, production network/auth
+policy, multi-replica/streaming semantics, and platform-wide retention remain open
+(`EXECUTED` / `OPEN`; facts C8/D5/D6/D10; [current evidence](EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)).
+The executed standalone FMS path is legacy, and the executed upstream NeMo
+0.23.0 PoC is not evidence that the managed RHOAI path works or is supported
+(`EXECUTED` / `OFFICIAL-SRC` / `OPEN` as separated in facts C11/D5/D6).
+
+Continuous validation uses strict `validation_sample_every=N`: select every `N`th
+completed vLLM response at the one persistent sampler, so `N=1` validates every
+completed generated-text response. The executed synchronous, non-streaming,
+single-replica matrix covered `N=1` (20/20), `N=5` (20/100), both watermark schemes
+and clean controls, fail-closed outage/retries, capacity-two overflow, generation/
+validation/queue-lag/gateway-response-ready latency, hash-only correlation,
+bounded-label metrics, and finite secret/plaintext scans. Client-observed network
+delivery latency remains unmeasured
+(`EXECUTED`, scoped / `OPEN`, client-observed; D10, the [current
+evidence](EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted),
+and the [latency semantics correction](EXPERIMENTS.md#latency-semantics-correction-2026-08-09)).
 
 ---
 
 ## Verified highlights
 
-Every claim below carries a verification tag defined in [`docs/facts.md`](docs/facts.md), which links each fact to exact quotes in [`docs/quotes.md`](docs/quotes.md). Nothing in this repo is asserted without a stated verification status.
+The active highlights below cite verification tags and sources registered in
+[`docs/facts.md`](docs/facts.md). Immutable historical material can contain
+unsupported or superseded context; [fact B24](docs/facts.md) defines that
+boundary rather than treating it as current evidence.
 
 ### The law
 
-- **The 2 December 2026 deadline is real EU law.** Regulation (EU) 2026/1744 ("Digital Omnibus on AI", in force 27 July 2026) added Article 111(4) to the AI Act: generative AI systems *"placed on the market before 2 August 2026"* must comply with the Article 50(2) marking obligation by **2 December 2026**. Verified verbatim against the authentic Official Journal text ([quote](docs/quotes.md#art-111-4), [OJ snapshot](research/sources/omnibus-32026R1744.html)).
-- **Scope caveat:** the grace period says only *"placed on the market"* — not *"put into service"*, a distinct term the same article uses two paragraphs earlier. An internal-only on-prem system may not literally qualify. This is a counsel question; the safe engineering posture is to treat Article 50(2) as due now.
-- **The rest of Article 50 has applied since 2 August 2026** with no grace period — including chatbot disclosure (50(1)) and deployer disclosure of published AI text (50(4)). Fines for Article 50 breaches: up to **€15M or 3% of worldwide annual turnover** (Art. 99(4)(g)) ([quote](docs/quotes.md#art-99-4)).
-- **The voluntary Code gives signatories a text-specific watermark path.** The Code of Practice on Transparency of AI-Generated Content (final 10 June 2026, ~190 signatories, confirmed adequate by the Commission and AI Board) says *"free-form text cannot transport metadata"*. Its measures treat a single watermark layer as sufficient for that channel and apply watermarking to free-form text **longer than 200 tokens**. The 200-token threshold is Code wording, not statutory text from Article 50. The Code uses a two-layer approach for exported “containerised text” ([quotes](docs/quotes.md#cop-measure-1-1)).
-- **Detection is a co-equal obligation.** Commission Guidelines on Article 50, para 70: marking without an available detection mechanism *"will not suffice"* ([quote](docs/quotes.md#guidelines-para-70)). Code signatories must also make detection mechanisms interoperable by **2 February 2027**.
-- **An enterprise self-hosting an open-weights model bears the obligation itself** — it is "provider" and "deployer" of its own AI system, per the Guidelines' own in-house example. The Article 2(12) open-source exemption explicitly excludes Article 50 ([quotes](docs/quotes.md#who-is-bound)).
+- **Article 111(4) says systems *"placed on the market before 2 August 2026"* must take the necessary Article 50(2) steps by 2 December 2026** (`OJ-VERBATIM`; [quote](docs/quotes.md#art-111-4), [OJ snapshot](research/sources/omnibus-32026R1744.html), fact A3).
+- **Scope remains a counsel question.** Article 111(4) says *"placed on the market"*, while Article 111(2) in the same amendment says *"placed on the market or put into service"* (`OJ-VERBATIM`). Application to an internal-only deployment is `OPEN`; no engineering conclusion is substituted for counsel (facts A4/D7).
+- **Dates and penalty language are registered from quoted text.** Article 113's date, Article 111(4)'s express reference to Article 50(2), and Article 99(4)(g)'s penalty language are `OJ-VERBATIM`; application beyond that express text remains `OPEN` for counsel (facts A2/A5/A6; [Article 50(4) quote](docs/quotes.md#art-50-4), [Article 99(4) quote](docs/quotes.md#art-99-4)).
+- **The voluntary Code's text-specific language is quoted, not treated as statutory wording.** It says *"free-form text cannot transport metadata"* and *"For free-form text longer than 200 tokens, watermarking still needs to be applied"* (`OJ-VERBATIM`; [Code extracts](docs/quotes.md#cop-measure-1-1), facts A7/A8).
+- **Detection is part of the quoted requirement.** The Commission Guidelines say that marking *"without the means for their detection being available"* *"will not suffice"*; the Code gives the 2 February 2027 interoperability date (`OJ-VERBATIM`; [extracts](docs/quotes.md#guidelines-para-70), facts A9/A10).
+- **Self-hosted open-weights application is an interpretation, not a quoted conclusion.** The definitions, in-house example, and Article 2(12) text are quoted in [who is bound](docs/quotes.md#who-is-bound); applying them to a specific enterprise deployment remains `OPEN` for counsel (fact A11).
 
 ### The technology
 
-- **vLLM has no watermarking support and no upstream RFC for it** (exhaustively searched 2026-08-07). The correct extension point exists: the V1 custom logits-processor plugin API (`--logits-processors`, entry points, per-request `vllm_xargs`), shipped since vLLM 0.10.1 ([details](docs/technical.md)).
-- **Hard constraint:** custom logits processors are incompatible with speculative decoding — vLLM errors at engine start (fix is an open, unmerged PR).
-- **Preferred building blocks** (all Apache-2.0, all official):
-  - Hugging Face `transformers` built-in **KGW** watermarking (`WatermarkingConfig` / `WatermarkDetector`) — fastest PoC path, detector included, fully self-contained.
-  - **Google's open-sourced SynthID-Text** (`google-deepmind/synthid-text`; integrated in `transformers` ≥ 4.46) — the only text watermark running in production anywhere (Gemini); the production candidate. Its high-accuracy Bayesian detector requires training (~10k examples); a simpler weighted-mean scorer works without training.
-  - **MarkLLM** (`THU-BPM/MarkLLM`, 1,000+ stars, 19+ algorithms) — the most-starred watermarking toolkit; use as algorithm reference, not as a hardened serving component.
-- **Prior-art warning:** `eth-sri/unified-watermarking` matches the current vLLM V1 plugin API (statically verified against v0.26.0) and its CPU detection works (we executed it), but it has **no license — do not copy its code**; design reference only. `dapurv5/vLLM-Watermark` monkey-patches vLLM internals, offline-only, no server path — not viable for serving ([assessments](docs/technical.md#plugin-assessments)).
-- **Mechanism proven locally** (CPU, transformers stack — the same logits-processor mechanism a vLLM plugin uses): watermarked output **z = 5.37** (p = 5.4e-9, detected), unwatermarked **z = 0.89**, human text **z = −0.54** (both correctly not flagged). Scripts and raw logs: [`research/demo/`](research/demo/).
+- **vLLM exposes the required V1 custom logits-processor API** (`OFFICIAL-SRC`, facts B3–B5). The dated upstream searches found no built-in content watermark or upstream RFC, but that absence is search-bounded and remains `OPEN` (facts B1–B2; [details](docs/technical.md)).
+- **Speculative decoding is a hard constraint in the recorded stack:** source validation rejects custom logits processors with speculative decoding (`OFFICIAL-SRC`), and the vLLM 0.18.0 startup rejection was observed (`EXECUTED`, fact B7).
+- **Implementation sources:**
+  - Hugging Face `transformers` ships KGW generation and detection under Apache-2.0 (`OFFICIAL-SRC`, fact B13). The repository's current execution evidence is the Phase 1/2 `vllm serve` record (`EXECUTED`, facts D1/D8).
+  - The Apache-2.0 SynthID-Text sources document Gemini deployment, trained Bayesian detection, and an untrained weighted-mean scorer (`OFFICIAL-SRC` / `CORROBORATED`, fact B15). The repository executed the untrained scorer through `vllm serve` (`EXECUTED`, fact D8); no claim of unique deployment or production suitability is made.
+  - MarkLLM was the most-starred toolkit among repositories in the dated review and provides many algorithm references (`OFFICIAL-SRC`, fact B16); it is not used as a hardened serving component (`STATIC`, current implementation).
+- **Prior-art warning:** `eth-sri/unified-watermarking` matches the current vLLM V1 plugin API (`STATIC`), but it has **no license — do not copy its code**. Its reported standalone CPU run is `OPEN`: no command or raw output was preserved in this repository, so the earlier execution claim and numbers are not evidence. `dapurv5/vLLM-Watermark` is an offline, private-internals approach (`STATIC`), not a serving implementation ([fact B11](docs/facts.md), [assessments](docs/technical.md#plugin-assessments)).
+- **The historical CPU report is not registered execution evidence.** It preserves source and console text under [`research/demo/`](research/demo/), but no exact invocation/raw record in `EXPERIMENTS.md`; its numerical claims remain `OPEN` under facts B14/B24. KGW and SynthID generation/detection are instead established by the recorded Phase 1/2 serving runs (`EXECUTED`, D1/D8).
 
 ### The platform
 
-- **OpenShift AI ships new-enough vLLM.** RHOAI 3.4 (GA): vLLM 0.17.1–0.18.0; RHOAI 3.3: 0.10.1.1.6–0.13.0 — at/above the 0.10.1 plugin-API floor. Per-deployment runtime args and custom ServingRuntime images are documented flows ([details](docs/openshift-ai.md)).
-- **The detection integration target must be reassessed.** The FMS/TrustyAI Guardrails Orchestrator exposes the previously selected detector API, but RHOAI 3.4 now labels FMS Guardrails legacy and directs users to NeMo Guardrails (`OFFICIAL-SRC`; fact C11). Phase 3 executed the FMS detector contract end to end (it remains the shipped, documented detector interface) and assessed the NeMo-forward surface ([api-notes](docs/api-notes-nemo-guardrails.md)); the live RHOAI `NemoGuardrails` CR check is Phase 4 work — see fact D5 for exactly what is closed vs open.
-- **Supportability open item:** Red Hat's Container Support Policy does not cover customer-modified product images, and no RHOAI-specific carve-out was found. Needs product-management confirmation before any production commitment.
+- **OpenShift AI's documented versions meet the plugin API's version floor.** RHOAI 3.4 lists vLLM 0.17.1–0.18.0 and RHOAI 3.3 lists 0.10.1.1.6–0.13.0 (`OFFICIAL-SRC`, facts C1–C3). The custom runtime image and internal ServingRuntime/InferenceService path executed in the recorded RHOAI 3.4.2 run; product supportability remains `OPEN` (`EXECUTED` / `OPEN`, facts C4/C8/D6; [details](docs/openshift-ai.md); [recovered evidence](EXPERIMENTS.md#2026-08-08--phase-4-rhoai-exact-transcript-recovered-executed-redacted)).
+- **The current detection integration is executed in scoped form.** RHOAI 3.4 labels FMS Guardrails legacy and directs users to NeMo Guardrails (`OFFICIAL-SRC`; fact C11). Phase 3 executed the standalone FMS detector path and a separate upstream NeMo 0.23.0 custom action (`EXECUTED`, fact D5; [api notes](docs/api-notes-nemo-guardrails.md)); the current RHOAI-managed `NemoGuardrails` correlation/broker action also executed through the internal gateway (`EXECUTED`, facts D5/D10; [current evidence](EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)).
+- **Supportability remains open:** the general container policy and the dated search for a product-specific carve-out are recorded, but the RHOAI answer requires product-management/support confirmation (`OFFICIAL-SRC` / `OPEN`, facts C4/D6).
 
 ---
 
@@ -46,26 +75,27 @@ Every claim below carries a verification tag defined in [`docs/facts.md`](docs/f
 |---|---|
 | [`docs/facts.md`](docs/facts.md) | Fact register — every claim, its verification status, its source |
 | [`docs/quotes.md`](docs/quotes.md) | Exact verbatim quotes from the legal texts, with provenance |
-| [`docs/technical.md`](docs/technical.md) | vLLM extension point, plugin assessments, watermarking science — committed copy predates the Phase 1-3 execution results; see `EXPERIMENTS.md` + `docs/facts.md` for current EXECUTED state |
+| [`docs/technical.md`](docs/technical.md) | vLLM extension point, plugin assessments, watermarking science, and links to current execution evidence |
 | [`docs/openshift-ai.md`](docs/openshift-ai.md) | OpenShift AI / TrustyAI integration facts |
 | [`docs/implementation.md`](docs/implementation.md) | Phased implementation plan with acceptance criteria |
 | [`docs/blog-draft.md`](docs/blog-draft.md) | Mixed-audience, evidence-annotated publication draft |
 | [`docs/cluster.md`](docs/cluster.md) | The OpenShift cluster this work deploys to (GPU scale-up/down) |
 | [`AGENTS.md`](AGENTS.md) | Operating rules for agents working in this repo |
-| [`research/demo/`](research/demo/) | Executed CPU proof: scripts, raw logs, results |
+| [`research/demo/`](research/demo/) | Read-only historical CPU report: scripts, console text, and unregistered results |
 | [`research/sources/`](research/sources/) | Snapshot of the authentic OJ text of Regulation (EU) 2026/1744 |
 | `gpu/`, `scripts/`, `install-config.template.yaml` | Cluster provisioning assets (see [`docs/cluster.md`](docs/cluster.md)) |
 
 ## Status
 
-- [x] Regulatory requirements verified against primary sources (2026-08-07/08)
-- [x] Technical landscape assessed; plugin repos inspected hands-on
-- [x] Watermark generate→detect mechanism proven locally (CPU, transformers)
-- [x] OpenShift 4.20 cluster provisioned (`ocp-ai`; billable GPU MachineSet lifecycle documented in [`docs/cluster.md`](docs/cluster.md))
+- [x] Regulatory quotations and dates registered against cited sources (2026-08-07/08); deployment-specific legal application remains `OPEN` for counsel ([fact register](docs/facts.md), [quoted sources](docs/quotes.md))
+- [x] Technical landscape assessed from the registered source review (`STATIC` / `OFFICIAL-SRC` / `OPEN` as separated in [facts B1–B20](docs/facts.md))
+- [ ] Register the historical local CPU invocation and raw output before treating B14 as execution evidence (`OPEN`; [fact B14](docs/facts.md))
+- [x] OpenShift 4.20 cluster provisioned (`EXECUTED`; `ocp-ai` and the recorded GPU lifecycle are documented in [`docs/cluster.md`](docs/cluster.md))
 - [x] Phase 0 — baseline vLLM v0.18.0 serving and benchmark on OpenShift (`EXECUTED`; [run record](EXPERIMENTS.md#2026-08-08--phase-0-baseline-serving--benchmark-executed))
 - [x] KGW package, detector, and benchmark tooling implemented (`STATIC`); 34-test local suite executed at the recorded 2026-08-08 revision (`EXECUTED`; [run record](EXPERIMENTS.md#2026-08-08--vllm_watermark-package-local-test-suite-executed))
-- [x] **Phase 1 — KGW logits processor running under `vllm serve`** (2026-08-08: TPR 1.000 / FPR 0.000 end-to-end on the cluster; overhead quantified; D1 closed — see `EXPERIMENTS.md`)
-- [x] Phase 2 — SynthID-Text generation + detection (2026-08-08: untrained scorers TPR 1.000/FPR 0.000 through `vllm serve`; GPU hot path 2.57ms/tok; D8 closed)
-- [x] Phase 3 — Detection service validated end-to-end through the FMS Guardrails Orchestrator (2026-08-08; correct verdicts incl. cross-scheme negatives, Ed25519-signed results; retention posture: hash-only logging verified in scoped log windows plus stateless/no-data-volume design — not an absolute zero-retention claim; the NeMo library's own 422-echo/event-log retention gap is a separate, recorded open item). Guardrails-path caveat: RHOAI 3.4 marks FMS legacy (C11); the NeMo-forward surface is assessed in docs/api-notes-nemo-guardrails.md with the live RHOAI `NemoGuardrails` CR check deferred to Phase 4 — D5 records exactly what remains open.
-- [ ] Phase 4 — OpenShift AI deployment (custom runtime image + ServingRuntime)
-- [ ] Phase 5 — Benchmarks, robustness tests, hardening
+- [x] **Phase 1 — KGW logits processor running under `vllm serve`** (`EXECUTED`, 2026-08-08: TPR 1.000 / FPR 0.000 in the registered matrix; corrected overhead quantified; [fact D1 and evidence](EXPERIMENTS.md#2026-08-08--phase-1-corrected--phase-2-synthid-through-vllm-serve-closes-d8))
+- [x] Phase 2 — SynthID-Text generation + detection (`EXECUTED`, 2026-08-08: untrained scorers TPR 1.000/FPR 0.000 through `vllm serve`; GPU hot path 2.57 ms/token; [fact D8 and evidence](EXPERIMENTS.md#2026-08-08--phase-1-corrected--phase-2-synthid-through-vllm-serve-closes-d8))
+- [x] Phase 3 — The detector ran end to end through standalone FMS, and an upstream NeMo 0.23.0 action separately returned the recorded block/pass decisions (`EXECUTED`, [fact D5 and evidence](EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half)). The detector's application log path is hash-based (`STATIC`), and finite checks found none of the tested distinctive sample substrings (`EXECUTED`, scoped); this is not an absolute retention claim. FMS is legacy, and NeMo 422/event-log handling remains unresolved (`OPEN`; [facts C11/D5](docs/facts.md)).
+- [x] Phase 4 — RHOAI 3.4.2 operator/DSC, custom runtime image, ServingRuntime/InferenceService/internal predictor, and current managed `NemoGuardrails` metadata/broker block/pass/fail-closed flow executed (`EXECUTED`, scoped; [facts C8/D5/D10 and evidence](EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)); external gateway/Istio pass-through and D6 supportability remain `OPEN`
+- [x] Phase 5 D9/D10 scope — detector startup validation was independently reviewed, corrected, rebuilt, source-matched, failed a controlled blank-value rollout, and recovered; the complete synchronous one-in-`N` matrix then reran through that current image with all 40 mode-bearing, hash-only selected-response records retained (`EXECUTED`; facts D9/D10; [current detector reconciliation](EXPERIMENTS.md#current-detector-reconciliation-2026-08-09); [current build-5 D10 rerun](EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09))
+- [ ] Phase 5 remaining hardening — realistic-batch overhead, tensor parallelism, robustness, key management, compliance mapping, attempt-counter semantics, bounded broker reads, transport/schema/mismatch/cancellation coverage, detector request/cache limits, expensive maximum-config review, and generation-side bound parity remain `OPEN` ([facts D2/D3/D4/D9/D10](docs/facts.md))
