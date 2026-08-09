@@ -37,30 +37,24 @@ request's resolved scheme (per-request `watermark_scheme` extra_arg, or
 `VLLM_WATERMARK_SCHEME` env default) equals `"synthid"` -- see
 `_new_row_state()`.
 
-DESIGN DECISION 1 -- context extraction across the prompt/output boundary
----------------------------------------------------------------------------
-The Phase 2 interface contract (shared design doc, not an upstream source)
-specifies: "the last (ngram_len-1)-token context comes from
-prompt_tok_ids/output_tok_ids refs at apply() time (same pattern as KGW's
-prev_token)". This is a DELIBERATE DEVIATION from how
+DESIGN DECISION 1 -- completion-only context and detector alignment
+---------------------------------------------------------------------
 `transformers.generation.logits_process.SynthIDTextWatermarkLogitsProcessor`
-itself builds context during `.generate()`: that class's
-`SynthIDTextWatermarkState.__init__` (logits_process.py lines 2558-2568)
-initializes `self.context = torch.zeros((batch_size, ngram_len - 1))` --
-i.e. it discards the prompt entirely for context purposes and always
-starts from `ngram_len - 1` zero-tokens, filling in real (generated) tokens
-only as `__call__` is invoked once per decode step
-(`self.state.context = concat((self.state.context, input_ids[:, -1:]))[:, 1:]`,
-lines 2727-2731). A vLLM row, by contrast, very often already has a prompt
-at least `ngram_len - 1` tokens long by the time the FIRST token is
-generated -- throwing that real context away in favor of zero-padding would
-be strictly worse (weaker, more collision-prone watermarking on the
-earliest generated tokens of every request) with no compensating benefit,
-so `_row_context()` below instead pulls real tokens from
-`prompt_tok_ids`/`output_tok_ids` (falling back to the prompt only for
-however many of the needed `ngram_len - 1` tokens the output list doesn't
-yet have -- exactly KGW's `prev_token` fallback, generalized from a window
-of 1 token to a window of `ngram_len - 1` tokens).
+initializes its context to `ngram_len - 1` zero tokens and only appends
+generated tokens on later decode calls (logits_process.py lines 2558-2568,
+2727-2731). Consequently its watermark state does not treat the request
+prompt as generated-token context.
+
+This vLLM integration follows that completion-only boundary: `_row_context()`
+never reads `prompt_tok_ids`. This is required by the shipped detector
+surface, which receives only generated completion text. If generation seeded
+its repeat history with a prompt-derived context, a completion that repeats
+that context could be left unwatermarked while the detector, lacking the
+prompt, would score it as watermarked. The focused regression test
+`test_row_context_does_not_seed_repeat_history_from_prompt`
+pins this failure mode down. The completion prefix is zero-padded (or skipped
+when `skip_first_ngram_calls` is on), matching the upstream initial-context
+convention.
 
 DESIGN DECISION 2 -- insufficient real context: skip_first_ngram_calls vs.
 zero-padding
@@ -68,9 +62,7 @@ zero-padding
 `vllm_watermark.synthid.core.g_values()` requires `len(ngram_context) ==
 cfg.ngram_len - 1` EXACTLY (raises ValueError otherwise) -- there is no
 "partial context" mode. So the very first apply() call(s) for a row whose
-combined prompt+output history is still shorter than `ngram_len - 1` (only
-possible when the prompt itself is shorter than `ngram_len - 1`, since
-`output_tok_ids` only grows) must do ONE of:
+completion history is still shorter than `ngram_len - 1` must do ONE of:
   (a) skip calling `process_scores_row` entirely for this row this step
       (leave `logits` untouched) -- this is what
       `SynthIDConfig.skip_first_ngram_calls` is FOR, per that field's own
@@ -85,13 +77,9 @@ possible when the prompt itself is shorter than `ngram_len - 1`, since
       matches transformers' own documented default -- see
       `SynthIDConfig.skip_first_ngram_calls` docstring, "transformers
       default False").
-Both choices are implemented in `_row_context()`. Note this only ever
-matters for the first `ngram_len - 1` tokens of a request whose PROMPT is
-also shorter than `ngram_len - 1` tokens (e.g. `ngram_len=5` and a
-2-token prompt) -- once `output_tok_ids` alone reaches `ngram_len - 1`
-entries, or if the prompt was long enough to begin with, every context is
-a full real-token window and neither branch above is ever taken again for
-that row.
+Both choices are implemented in `_row_context()`. They matter only for the
+first `ngram_len - 1` generated tokens. Once `output_tok_ids` reaches that
+length, every context is a full completion-token window.
 
 DESIGN DECISION 3 -- repeated-context history representation
 ---------------------------------------------------------------------------
@@ -107,10 +95,12 @@ comparison (never a hash -- see `detector.py` module docstring "Repeated-
 context masking deviation" for why this is strictly more accurate than
 transformers' own int64-hash ring buffer, which this package deliberately
 does not replicate anywhere). Using the identical idiom in both places
-means "was this context already seen" means exactly the same thing whether
-asked at generation time (here) or at detection time (`detector.py`),
-which matters because the detection side reconstructs comparable masking
-during offline scoring of vLLM-generated text — implemented in
+means "was this context already seen" means exactly the same thing for
+every completion context the detector scores. The zero-padded bootstrap
+contexts are deliberately not entered into generation's history, because
+the completion-only detector does not score them. This matters because the
+detection side reconstructs comparable masking during offline scoring of
+vLLM-generated text — implemented in
 `vllm_watermark.synthid.detector` and served by `detector/app.py`
 (Phase 3, built and validated end-to-end on-cluster 2026-08-08; see
 EXPERIMENTS.md).
@@ -553,7 +543,7 @@ class SynthIDLogitsProcessor(LogitsProcessor):
     def _row_context(self, row: "RowState") -> "tuple[list[int], bool]":
         """Compute this row's `(ngram_len - 1)`-token context at the
         current apply() call, and whether this row should be SKIPPED this
-        call. See class docstring "DESIGN DECISION 1" (prompt/output
+        call. See class docstring "DESIGN DECISION 1" (completion-only
         boundary) and "DESIGN DECISION 2" (insufficient real context:
         skip vs. zero-pad).
 
@@ -570,18 +560,13 @@ class SynthIDLogitsProcessor(LogitsProcessor):
             return [], False
 
         tail = row.output_tok_ids[-needed:] if row.output_tok_ids else []
-        if len(tail) < needed:
-            remaining = needed - len(tail)
-            prompt = row.prompt_tok_ids or []
-            prompt_tail = prompt[-remaining:] if prompt else []
-            tail = prompt_tail + tail
 
         if len(tail) < needed:
             if self._skip_first_ngram_calls:
                 return [], True
             # Zero-pad on the left -- mirrors transformers' own
-            # zero-initialized context for insufficient history (see class
-            # docstring "DESIGN DECISION 2").
+            # zero-initialized completion context (see class docstring
+            # "DESIGN DECISION 1/2").
             tail = [0] * (needed - len(tail)) + tail
 
         return tail, False
@@ -636,7 +621,14 @@ class SynthIDLogitsProcessor(LogitsProcessor):
             if skip:
                 continue
 
-            context_seen = row.context_history.push(tuple(ngram_context))
+            # The completion-only detector starts scoring only once a full
+            # real completion context exists. Do not let the unscored,
+            # zero-padded bootstrap contexts affect repeat masking later.
+            context_seen = (
+                row.context_history.push(tuple(ngram_context))
+                if len(row.output_tok_ids) >= self._ngram_len - 1
+                else False
+            )
 
             cfg = SynthIDConfig(
                 vocab_size=self._vocab_size,

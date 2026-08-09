@@ -31,7 +31,7 @@ Section map:
   - validate_params (incl. scheme validation)
   - update_state: added / removed / moved bookkeeping
   - scheme coordination (row absent when watermark_scheme != "synthid")
-  - _row_context(): prompt/output boundary, zero-padding vs.
+  - _row_context(): completion-only boundary, zero-padding vs.
     skip_first_ngram_calls (Task brief: "investigate what transformers
     does for the first calls ... and mirror it" -- see
     synthid/processor.py module docstring "DESIGN DECISION 1/2" for the
@@ -67,6 +67,10 @@ from vllm_watermark.synthid.core import (  # noqa: E402
     DEFAULT_SYNTHID_DEPTH,
     SynthIDConfig,
     process_scores_row,
+)
+from vllm_watermark.synthid.detector import (  # noqa: E402
+    _context_windows,
+    _repeated_context_mask,
 )
 from vllm_watermark.keys import load_key  # noqa: E402
 
@@ -414,7 +418,7 @@ def test_new_row_state_scheme_default_from_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _row_context(): prompt/output boundary, zero-padding vs.
+# _row_context(): completion-only boundary, zero-padding vs.
 # skip_first_ngram_calls -- see synthid/processor.py "DESIGN DECISION 1/2"
 # ---------------------------------------------------------------------------
 
@@ -439,13 +443,43 @@ def test_row_context_uses_output_when_sufficient(monkeypatch):
     assert ctx == [8, 9, 10]
 
 
-def test_row_context_mixes_prompt_and_output_at_boundary(monkeypatch):
+def test_row_context_does_not_use_prompt_at_boundary(monkeypatch):
     monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", "4")  # needed=3
     processor = _make_processor(vocab_size=50)
     row = _row(prompt_tok_ids=[100, 101, 102, 103], output_tok_ids=[55])
     ctx, skip = processor._row_context(row)
     assert not skip
-    assert ctx == [102, 103, 55], "last 2 prompt tokens + the 1 output token, in order"
+    assert ctx == [0, 0, 55], "prompt tokens must not enter completion-only context"
+
+
+def test_row_context_does_not_seed_repeat_history_from_prompt(monkeypatch):
+    """The public detector receives completion tokens, not the request
+    prompt. Generation must therefore not seed its context history from the
+    prompt: otherwise it can suppress a later completion context that the
+    detector has no way to reconstruct.
+
+    With width=1, a prompt ending in 7 followed by completion [7, 8] is the
+    minimal counterexample.  If generation records the prompt context (7,)
+    for token 7, it treats the context for token 8 as repeated.  Completion-
+    only detection sees just one scoreable window, (7,) -> 8, and scores it.
+    """
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", "2")  # needed=1
+    processor = _make_processor(vocab_size=50)
+    output = []
+    row = _row(prompt_tok_ids=[7], output_tok_ids=output)
+
+    context, skip = processor._row_context(row)
+    assert not skip
+    assert context == [0]
+
+    output.append(7)
+    context, skip = processor._row_context(row)
+    assert not skip
+    assert context == [7]
+
+    windows = list(_context_windows([7, 8], ngram_len=2))
+    assert windows == [((7,), 8)]
+    assert _repeated_context_mask([context for context, _ in windows], 1024) == [True]
 
 
 def test_row_context_zero_pads_when_insufficient_and_not_skipping(monkeypatch):
@@ -455,7 +489,7 @@ def test_row_context_zero_pads_when_insufficient_and_not_skipping(monkeypatch):
     row = _row(prompt_tok_ids=[9], output_tok_ids=[])
     ctx, skip = processor._row_context(row)
     assert not skip
-    assert ctx == [0, 0, 0, 9]
+    assert ctx == [0, 0, 0, 0]
 
 
 def test_row_context_handles_none_prompt(monkeypatch):
@@ -481,7 +515,7 @@ def test_row_context_skip_flag_does_not_skip_once_context_sufficient(monkeypatch
     monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", "3")
     monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_SKIP_FIRST_NGRAM_CALLS", "on")
     processor = _make_processor(vocab_size=50)
-    row = _row(prompt_tok_ids=[9, 10], output_tok_ids=[])
+    row = _row(prompt_tok_ids=[9, 10], output_tok_ids=[9, 10])
     ctx, skip = processor._row_context(row)
     assert not skip
     assert ctx == [9, 10]
@@ -641,7 +675,7 @@ def test_apply_matches_process_scores_row_called_directly(monkeypatch):
         context_history_size=processor._context_history_size,
         skip_first_ngram_calls=processor._skip_first_ngram_calls,
     )
-    ngram_context = prompt[-2:]  # needed=2, output empty -> prompt tail
+    ngram_context = [0, 0]  # needed=2, no completion context -> zero-padded
     expected = process_scores_row(original_row.clone(), ngram_context, cfg, context_seen=False)
     assert torch.allclose(logits[0], expected)
 
@@ -697,7 +731,7 @@ def test_apply_skip_first_ngram_calls_leaves_logits_untouched_until_enough_conte
     assert not torch.equal(logits3[0], original3[0]), "2 real context tokens (== needed) -> now watermarked"
 
 
-def test_apply_repeated_context_leaves_row_unchanged(monkeypatch):
+def test_apply_does_not_treat_prompt_boundary_as_repeated_context(monkeypatch):
     """End-to-end version of the _ContextHistory unit tests above: a
     row whose context repeats must come back from apply() byte-identical
     to its pre-apply() input (process_scores_row's context_seen=True
@@ -719,11 +753,24 @@ def test_apply_repeated_context_leaves_row_unchanged(monkeypatch):
     processor.apply(first_input)
     assert not torch.equal(first_input[0], first_copy[0]), "sanity: first call actually biases the row"
 
-    output_tok_ids.append(3)  # same token value as the prompt -> context (3,) repeats
+    output_tok_ids.append(3)  # same token value as prompt must not be treated as a repeat
     second_input = torch.randn(1, vocab_size)
     second_copy = second_input.clone()
     processor.apply(second_input)
-    assert torch.equal(second_input[0], second_copy[0]), "repeated context must leave the row untouched"
+    assert not torch.equal(second_input[0], second_copy[0]), (
+        "completion context (3,) is first scored occurrence; prompt context is not in history"
+    )
+
+    output_tok_ids.append(3)
+    third_input = torch.randn(1, vocab_size)
+    third_copy = third_input.clone()
+    processor.apply(third_input)
+    assert torch.equal(third_input[0], third_copy[0]), (
+        "the second completion occurrence of context (3,) must be masked"
+    )
+
+    windows = list(_context_windows([3, 3, 8], ngram_len=2))
+    assert _repeated_context_mask([context for context, _ in windows], 1024) == [True, False]
 
 
 def test_apply_multiple_rows_only_active_ones_change(monkeypatch):
