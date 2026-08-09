@@ -1,0 +1,230 @@
+# EXECUTED (scoped Phase 4 current D10 path): custom output-rail configuration
+# for the RHOAI-managed NemoGuardrails CR. The gateway -> managed NeMo ->
+# metadata-only broker -> exact pending detector path passed real KGW/SynthID
+# positive and clean controls; IDs, content digests, scheme, and non-secret key
+# ID correlated. Source: facts D5/D10 and [current-path evidence](../../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted).
+# The RHOAI 3.4.2 NemoGuardrails resource was Ready; the managed NeMo 0.21.0
+# image was `sha256:22125dbbd05d1cfa7af931fdeca9da72c6d267a05c33a1f757daf3095ddcca7c`,
+# and the current action hash matched the applied cluster ConfigMap.
+#
+# RHOAI 3.4 documents ConfigMap-mounted config.yaml, rails.co, and actions.py
+# custom actions. Sources:
+# https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html-single/enabling_ai_safety_with_guardrails/index
+#
+# EXECUTED (scoped D10): the action deliberately emits no response content,
+# keys, or broker payloads to logs. It returns True to block a positive watermark
+# verdict. On missing or mismatched correlation metadata, transport, or schema
+# failure, the explicit policy decides: closed blocks (True), open passes (False).
+# The actual detector was taken to zero ready endpoints: three attempts (two
+# retries) failed closed, then the detector was restored. The finite marker scan
+# found zero matches. Platform-wide nonretention and HTTP broker hardening/auth/
+# network policy remain OPEN. Source: [current-path evidence](../../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted).
+# STATIC source observations inside the literal data below (managed 0.21.0
+# ContextVar and verbose-handler behavior) are version-pinned and must be
+# re-reviewed on upgrade; their current runtime behavior is EXECUTED in the same
+# current-path evidence. This outer qualification does not alter ConfigMap data.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemo-watermark-config
+  namespace: watermark
+data:
+  config.yaml: |
+    models:
+      - type: main
+        engine: openai
+        parameters:
+          openai_api_base: "http://watermark-vllm-predictor.watermark.svc.cluster.local:8080/v1"
+          model_name: "watermark-vllm"
+    rails:
+      output:
+        flows:
+          - watermark check
+  config.py: |
+    """Disable NeMo's body-bearing verbose event handler for this config.
+
+    The RHOAI 3.4.2 managed image constructs each LLMRails instance with
+    verbose=True even though the server CLI itself is not passed --verbose.
+    This config hook runs during instance construction and removes that
+    handler before any request is processed. Re-verify on every image upgrade.
+    """
+
+    import logging
+
+    from nemoguardrails.logging import verbose
+    from nemoguardrails.logging.verbose import VerboseHandler
+
+
+    def init(app):
+        root_logger = logging.getLogger()
+        for handler in tuple(root_logger.handlers):
+            if isinstance(handler, VerboseHandler):
+                root_logger.removeHandler(handler)
+                handler.close()
+
+        root_logger.setLevel(logging.WARNING)
+        # Keep the global marker true after removing the handler so another
+        # lazily-created rails instance cannot attach it again.
+        verbose.verbose_mode_enabled = True
+        verbose.verbose_llm_calls = False
+        verbose.debug_mode_enabled = False
+        app.verbose = False
+        if hasattr(app, "runtime"):
+            app.runtime.verbose = False
+  rails.co: |
+    define bot refuse watermarked response
+      "Response withheld pending watermark policy review."
+
+    define flow watermark check
+      $is_watermarked = execute watermark_check
+      if $is_watermarked
+        bot refuse watermarked response
+        stop
+  actions.py: |
+    import asyncio
+    from collections.abc import Mapping
+    from contextvars import ContextVar
+    import json
+    import os
+    import re
+    from typing import Optional
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    from nemoguardrails.actions import action
+
+    # Pinned RHOAI managed NeMo 0.21.0 internal API: the guardrail-checks
+    # route stores request headers in this ContextVar before generate_async.
+    # This is not a public contract; re-verify it on every managed image
+    # upgrade. Never log the ContextVar, its values, or the request content.
+    try:
+        from nemoguardrails.server.api import api_request_headers as _api_request_headers
+    except (ImportError, AttributeError):
+        _api_request_headers = None
+
+    _VALIDATION_ID_RE = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    )
+    _CONTENT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+    _KEY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    _RESPONSE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+    _BROKER_RESPONSE_FIELDS = frozenset(
+        {"validation_id", "response_id", "content_sha256", "scheme", "key_id", "verdict"}
+    )
+
+    def _failure_blocks() -> bool:
+        return os.environ.get(
+            "WATERMARK_VALIDATION_FAILURE_POLICY", "closed"
+        ).strip().lower() != "open"
+
+    _HEADER_NAMES = (
+        "x-watermark-validation-id",
+        "x-watermark-response-id",
+        "x-watermark-content-sha256",
+        "x-watermark-scheme",
+        "x-watermark-key-id",
+    )
+
+    def _header_value(headers: Mapping, name: str) -> str:
+        matches = []
+        for header_name, value in headers.items():
+            if not isinstance(header_name, str):
+                raise ValueError("invalid watermark request headers")
+            if header_name.lower() == name:
+                matches.append(value)
+        if len(matches) != 1 or not isinstance(matches[0], str):
+            raise ValueError("invalid watermark request headers")
+        value = matches[0].strip()
+        if not value or any(character in value for character in (",", "\r", "\n")):
+            raise ValueError("invalid watermark request headers")
+        return value
+
+    def _validation_metadata() -> dict:
+        if not isinstance(_api_request_headers, ContextVar):
+            raise RuntimeError("managed NeMo request headers are unavailable")
+        try:
+            headers = _api_request_headers.get()
+        except (LookupError, RuntimeError, TypeError):
+            raise RuntimeError("managed NeMo request headers are unavailable")
+        if not isinstance(headers, Mapping):
+            raise ValueError("invalid watermark request headers")
+        values = {name: _header_value(headers, name) for name in _HEADER_NAMES}
+        validation_id = values["x-watermark-validation-id"]
+        response_id = values["x-watermark-response-id"]
+        content_sha256 = values["x-watermark-content-sha256"]
+        scheme = values["x-watermark-scheme"]
+        key_id = values["x-watermark-key-id"]
+        if (
+            not isinstance(validation_id, str)
+            or not _VALIDATION_ID_RE.fullmatch(validation_id)
+            or not isinstance(response_id, str)
+            or not _RESPONSE_ID_RE.fullmatch(response_id)
+            or not isinstance(content_sha256, str)
+            or not _CONTENT_SHA256_RE.fullmatch(content_sha256)
+            or scheme not in {"kgw", "synthid"}
+            or not isinstance(key_id, str)
+            or not _KEY_ID_RE.fullmatch(key_id)
+        ):
+            raise ValueError("invalid watermark validation context")
+        return {
+            "validation_id": validation_id,
+            "response_id": response_id,
+            "content_sha256": content_sha256,
+            "scheme": scheme,
+            "key_id": key_id,
+        }
+
+    def _broker_validate(metadata: dict) -> bool:
+        endpoint = os.environ.get("WATERMARK_VALIDATION_BROKER_URL", "").strip()
+        if not endpoint:
+            raise RuntimeError("validation broker URL is not configured")
+        token = os.environ.get("WATERMARK_VALIDATION_BROKER_TOKEN", "").strip()
+        if not token:
+            raise RuntimeError("validation broker authentication is not configured")
+        # The pending gateway response content is the detector authority.
+        # bot_message is only an output-rail invocation gate and is never sent
+        # to the broker from this rail.
+        body = dict(metadata)
+        request = Request(
+            endpoint,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=30) as response:
+            if response.status != 200:
+                raise RuntimeError("validation broker returned a non-success status")
+            payload = json.loads(response.read().decode("utf-8"))
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != _BROKER_RESPONSE_FIELDS
+            or not isinstance(payload.get("verdict"), bool)
+            or any(payload.get(field) != value for field, value in metadata.items())
+        ):
+            raise RuntimeError("validation broker returned an invalid payload")
+        return payload["verdict"]
+
+    @action(is_system_action=True)
+    async def watermark_check(context: Optional[dict] = None) -> bool:
+        if not isinstance(context, dict):
+            return _failure_blocks()
+        if "bot_message" not in context:
+            return _failure_blocks()
+        text = context["bot_message"]
+        if not isinstance(text, str):
+            return _failure_blocks()
+        try:
+            metadata = _validation_metadata()
+            return await asyncio.to_thread(_broker_validate, metadata)
+        except (
+            OSError,
+            URLError,
+            ValueError,
+            json.JSONDecodeError,
+            RuntimeError,
+            TypeError,
+        ):
+            return _failure_blocks()

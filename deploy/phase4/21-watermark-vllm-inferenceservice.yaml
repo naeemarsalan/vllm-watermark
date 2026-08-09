@@ -1,0 +1,44 @@
+# EXECUTED (scoped Phase 4 deployment, 2026-08-08): the InferenceService using
+# this public model shape reached Ready in Standard mode and its internal
+# predictor answered health/model probes. External KServe gateway/Istio
+# pass-through remains `OPEN` (fact C8; source: EXPERIMENTS.md recovered
+# transcript). No storage credential is required for this public model; private-
+# model credentials must never be added to this file (`STATIC` safety rule).
+#
+# Shape/source: RHOAI 3.4 "InferenceService" vLLM example:
+# https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/pdf/configuring_your_model-serving_platform/Red_Hat_OpenShift_AI_Self-Managed-3.4-Configuring_your_model-serving_platform-en-US.pdf
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: watermark-vllm
+  namespace: watermark
+  annotations:
+    # EXECUTED: KServe canonicalized the RHOAI deployment to Standard (source:
+    # EXPERIMENTS.md recovered Phase 4 transcript).
+    serving.kserve.io/deploymentMode: Standard
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  predictor:
+    # EXECUTED: a surge replica stayed unschedulable while the existing replica
+    # held the only accelerator (source: EXPERIMENTS.md Phase 4 deployment
+    # troubleshooting); use Recreate for this single-GPU PoC.
+    deploymentStrategy:
+      type: Recreate
+    enableServiceLinks: false
+    minReplicas: 1
+    maxReplicas: 1
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: watermark-vllm
+      storageUri: hf://Qwen/Qwen2.5-0.5B-Instruct
+      resources:
+        requests:
+          cpu: "1"
+          memory: 8Gi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "6"
+          memory: 24Gi
+          nvidia.com/gpu: "1"

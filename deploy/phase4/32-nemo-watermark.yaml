@@ -1,0 +1,49 @@
+# EXECUTED (scoped Phase 4 current D10 path): managed-NeMo resource template;
+# the gateway -> managed NeMo -> metadata-only broker -> exact pending detector
+# path passed real KGW/SynthID positive and clean controls, with correlated IDs,
+# digests, scheme, and non-secret key ID (source: [current-path evidence](../../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)).
+# RHOAI 3.4.2 reported NemoGuardrails Ready; managed NeMo 0.21.0 used image
+# `sha256:22125dbbd05d1cfa7af931fdeca9da72c6d267a05c33a1f757daf3095ddcca7c`,
+# and the current action hash matched the applied cluster ConfigMap.
+#
+# Source/schema: RHOAI 3.4 NemoGuardrails custom resource reference:
+# https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html-single/enabling_ai_safety_with_guardrails/index
+#
+# The TrustyAI DSC component must be Managed and the named ConfigMap, Service
+# Account, RoleBinding, and token Secret must exist first. EXECUTED (scoped D10):
+# this resource passes correlation metadata only to the configured internal
+# validation broker; the exact pending gateway response content is the detector
+# authority, and the action never sends response text to the broker or calls a
+# detector directly. Three attempts (two retries) with zero detector endpoints
+# failed closed, then recovery succeeded. Platform-wide nonretention and HTTP
+# broker hardening/auth/network policy remain OPEN. Source: [current-path evidence](../../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted).
+apiVersion: trustyai.opendatahub.io/v1alpha1
+kind: NemoGuardrails
+metadata:
+  name: nemo-watermark
+  namespace: watermark
+  annotations:
+    security.opendatahub.io/enable-auth: "true"
+spec:
+  replicas: 1
+  nemoConfigs:
+    - name: watermark-validation
+      configMaps:
+        - nemo-watermark-config
+      default: true
+  env:
+    - name: OPENAI_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: nemo-watermark-model-token
+          key: token
+    - name: WATERMARK_VALIDATION_BROKER_URL
+      value: >-
+        http://watermark-validation-gateway.watermark.svc.cluster.local:8080/internal/v1/guardrail-action
+    - name: WATERMARK_VALIDATION_BROKER_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: watermark-validation-gateway-auth
+          key: broker-token
+    - name: WATERMARK_VALIDATION_FAILURE_POLICY
+      value: closed

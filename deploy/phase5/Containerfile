@@ -1,0 +1,37 @@
+# EXECUTED (scoped 2026-08-09; Phase 5): CPU gateway build recipe. Build5
+# completed using this curated context and the resulting immutable gateway
+# digest is pinned in the Deployment. The linux/amd64 Python base was resolved
+# from the official registry and pinned by digest on 2026-08-08. Reruns must
+# preserve the curated context and redact secrets from all captured output.
+#
+# The build context is deliberately curated: Containerfile,
+# gateway-entrypoint.sh, requirements.txt, and the four runtime Python files
+# under validation/.  Never submit the repository root, which contains
+# gitignored credential paths.
+FROM docker.io/library/python@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+
+ENV HOME=/tmp \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/app-root/src
+
+COPY requirements.txt /tmp/validation-requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/validation-requirements.txt \
+    && rm -f /tmp/validation-requirements.txt
+
+COPY validation/ /opt/app-root/src/validation/
+COPY gateway-entrypoint.sh /usr/local/bin/validation-gateway-entrypoint
+
+# Application files only need to be readable by OpenShift's arbitrary UID.
+# All runtime writes go to the PVC or /tmp mounts in the Deployment.
+RUN chmod 0555 /usr/local/bin/validation-gateway-entrypoint \
+    && find /opt/app-root/src/validation -type d -exec chmod 0555 {} + \
+    && find /opt/app-root/src/validation -type f -exec chmod 0444 {} + \
+    && python -c 'import fastapi, httpx, uvicorn; import validation.gateway, validation.http_clients, validation.main'
+
+USER 1001
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/validation-gateway-entrypoint"]
+CMD ["python", "-m", "validation.main"]

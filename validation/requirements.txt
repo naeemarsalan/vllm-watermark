@@ -1,0 +1,4 @@
+# Runtime dependencies for `python -m validation.main`.
+fastapi==0.115.12
+httpx==0.28.1
+uvicorn==0.34.3

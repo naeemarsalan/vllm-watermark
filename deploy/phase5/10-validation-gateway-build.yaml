@@ -1,0 +1,36 @@
+---
+# EXECUTED (scoped 2026-08-09; Phase 5): binary OpenShift build objects. Build5
+# completed from the curated context documented in README.md. The mutable output
+# tag is only a build hand-off; the Deployment uses the resulting immutable
+# digest. Rerun with the same allowlisted context and record redacted output.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: watermark-validation-gateway
+  namespace: watermark
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: watermark-validation-gateway
+  namespace: watermark
+spec:
+  runPolicy: Serial
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Containerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: watermark-validation-gateway:0.1.0
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
