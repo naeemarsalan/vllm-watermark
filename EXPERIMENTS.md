@@ -4785,3 +4785,88 @@ this section supersedes only the missing-`mode` projection in the immediately
 preceding current-build report. The earlier actual detector-outage and eight-surface
 finite scan remain evidence for their recorded detector revision and were not
 repeated. All explicitly listed D10 production boundaries remain `OPEN`.
+
+## 2026-08-10 — fuzz/stress harness hardening and resource-budget evidence
+
+**Scope:** local CPU execution only. No model server, generated text, deployment
+key, or GPU was used. The smoke matrices below are harness checks, not estimates of
+cluster failure rates, detector population rates, or production performance.
+
+**Environment (`EXECUTED`; raw output):**
+
+```text
+python3 -c 'import platform, torch, transformers; print("python=" + platform.python_version()); print("torch=" + torch.__version__); print("transformers=" + transformers.__version__)'
+python=3.14.4
+torch=2.9.1+cu128
+transformers=4.57.6
+```
+
+The first diagnostic full-suite run exposed seven test-fixture failures: scalar
+maxima had been combined with default values that correctly violated the new
+cross-parameter budgets. Its raw summary was
+`7 failed, 487 passed, 561 warnings in 504.07s (0:08:24)`. The fixtures were
+changed to exercise each scalar maximum inside a compatible cross-budget; no
+runtime ceiling was weakened. Focused and final raw results:
+
+```text
+python3 -m pytest -q tests/test_synthid_processor_static.py::test_init_accepts_compatible_synthid_generation_boundaries detector/tests/test_service.py::TestHealthReady::test_vocab_size_fallback_maximum_is_accepted detector/tests/test_service.py::TestStartupConfigurationValidation::test_numeric_setting_maximum_is_accepted_by_load_settings detector/tests/test_service.py::TestStartupConfigurationValidation::test_numeric_setting_maximum_reaches_ready_lifespan
+....................                                                     [100%]
+20 passed, 66 warnings in 10.17s
+
+python3 -m pytest -q --disable-warnings
+........................................................................ [ 14%]
+........................................................................ [ 29%]
+........................................................................ [ 43%]
+........................................................................ [ 58%]
+........................................................................ [ 72%]
+........................................................................ [ 87%]
+..............................................................           [100%]
+494 passed, 561 warnings in 391.84s (0:06:31)
+```
+
+The warnings are third-party Python 3.14 deprecations from FastAPI and its
+runtime dependencies; the unsuppressed diagnostic run identified no repository
+warning category.
+
+**Bounded harness smokes (`EXECUTED`; exact commands and raw compact output):**
+
+```text
+set -o pipefail; PYTHONPATH=src python3 benchmarks/fuzz_watermark.py --seed 123 --kgw-equivalence-cases 3 --kgw-invariant-cases 5 --synthid-equivalence-cases 3 --detector-cases 10 --profile-iterations 1 --profile-warmup 0 --kgw-profile-vocab 32 --synthid-process-profile 32:2 --synthid-detect-profile 32:8:2 | jq -c '{status,aggregate}'
+{"status":"passed","aggregate":{"elapsed_seconds":0.11704231599287596,"expected_errors":{"kgw_short_input":1,"synthid_short_input":1},"failure_rate":0.0,"failure_rate_wilson_95":[0.0,0.154639018924847],"failures":0,"latency_note":"omitted at aggregate level; campaign reservoirs are not count-weighted","throughput_cases_per_second":179.4222869041502,"total_cases":21}}
+
+set -o pipefail; PYTHONPATH=src python3 benchmarks/stress_detection.py --output - --compact --max-cells 4 --repeats 1 --lengths 1,8 --vocab-sizes 32 --patterns uniform_random --timeout-seconds 30 | jq -c '{matrix_cells,summary}'
+{"matrix_cells":4,"summary":{"attempt_timeouts":0,"attempts_completed":4,"attempts_requested":4,"attempts_started":4,"cells":4,"cells_with_unexpected_outcomes":0,"contract_successes":4,"expected_too_short_errors":2,"incomplete_attempts":0,"nonfinite_results":0,"peak_rss_bytes_max":682188800,"protocol_errors":0,"rates_wilson95":{"cell_timeout":{"count":0,"denominator":4,"lower":0.0,"rate":0.0,"upper":0.4898908364545973},"contract_success":{"count":4,"denominator":4,"lower":0.5101091635454027,"rate":1.0,"upper":1.0},"expected_too_short":{"count":2,"denominator":4,"lower":0.15003898915214947,"rate":0.5,"upper":0.8499610108478506},"nonfinite":{"count":0,"denominator":4,"lower":0.0,"rate":0.0,"upper":0.4898908364545973},"scoring_success":{"count":2,"denominator":4,"lower":0.15003898915214947,"rate":0.5,"upper":0.8499610108478506},"technical_failure_attempt":{"count":0,"denominator":4,"lower":0.0,"rate":0.0,"upper":0.4898908364545973},"timeout":{"count":0,"denominator":4,"lower":0.0,"rate":0.0,"upper":0.4898908364545973}},"scoring_successes":2,"technical_failure_attempts":0,"technical_failures":0,"timeouts":0,"unexpected_outcomes":0,"unexpected_successes":0,"worker_failures":0}}
+
+set -o pipefail; python3 benchmarks/stress_gateway.py --requests 20 --concurrency 1,4 --sample-every 1,5,257 | jq -c '{passed,aggregate}'
+{"passed":true,"aggregate":{"attempts":120,"invariant_failures":0,"invariants_passed":true,"peak_rss_bytes":50397184,"request_failure_rate":{"events":0,"rate":0.0,"total":120,"wilson_95":[0.0,0.031019166418703486]},"request_failures":0,"wall_seconds":0.11156903099617921}}
+```
+
+**Static checks and billable-resource cleanup (`EXECUTED`; raw output):**
+
+```text
+python3 -m compileall -q benchmarks src tests validation detector && git diff --check && echo 'compileall=passed diff_check=passed'
+compileall=passed diff_check=passed
+
+yamllint deploy/phase4/20-watermark-vllm-servingruntime.yaml && echo 'yamllint=passed'
+yamllint=passed
+
+python3 scripts/check-doc-links.py --external README.md EXPERIMENTS.md docs/*.md docs/*.html
+clean: 15 documents, 333 local references, 46 external URLs (network checks requested)
+
+KUBECONFIG=cluster/auth/kubeconfig oc -n openshift-machine-api get machineset -o json | jq -r '[.items[] | select(.spec.template.metadata.labels["node-role.kubernetes.io/gpu"] == "")] as $gpu | if ($gpu | length) == 1 then ($gpu[0] | "gpu_machineset=1 replicas=\(.spec.replicas // 0)/\(.status.replicas // 0)/\(.status.readyReplicas // 0)/\(.status.availableReplicas // 0)") else error("expected exactly one GPU MachineSet") end'
+gpu_machineset=1 replicas=0/0/0/0
+```
+
+**Resource guards (`STATIC`, source: current code; regression behavior covered by
+the passing suite above):** direct detector inputs are capped at 32 texts,
+1,048,576 characters per text, 4,194,304 aggregate characters, 131,072 tokens per
+text, and 262,144 aggregate tokens before scoring. KGW green-list allocations are
+capped at 4 MiB; generation cache configuration is capped at 128 entries and a
+64 MiB cross-budget; detector cache capacity derives from a conservative 64 MiB
+budget. SynthID sampling tables are capped at 16 MiB each with four CPU entries
+and two entries per device; three simultaneous vocab-by-depth int64 matrices are
+capped at 192 MiB; context history is capped at 16,384 tokens per row. The
+151,936-vocabulary/depth-30 deployment configuration remains accepted. These are
+deployment resource constraints, not algorithmic compatibility or production
+capacity claims. The changed image has not been rebuilt or rerun on OpenShift;
+that deployment validation remains `OPEN`.

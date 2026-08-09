@@ -186,11 +186,25 @@ def test_greenlist_ids_device_independent():
     ids_second = greenlist_ids(7, cfg)
     assert torch.equal(ids_first, ids_second)
     assert ids_first.device.type == "cpu"
-
-    # Only CPU is available on this workstation (AGENTS.md: no local GPU);
-    # moving CPU->CPU is still a meaningful check that the returned tensor
-    # is a plain, device-movable LongTensor and that moving it doesn't
-    # mutate/resample anything.
+    # Only CPU is available on this workstation; moving CPU->CPU confirms
+    # the returned tensor remains a plain, device-movable LongTensor.
     moved = ids_first.to("cpu")
     assert torch.equal(moved, ids_first)
     assert ids_first.dtype == torch.int64
+
+
+def test_greenlist_ids_does_not_retain_full_randperm_storage():
+    cfg = KGWConfig(vocab_size=4096, gamma=0.25, delta=2.0, hash_key=7)
+    ids = greenlist_ids(11, cfg)
+    assert ids.numel() == cfg.greenlist_size
+    assert ids.untyped_storage().nbytes() == ids.numel() * ids.element_size()
+
+
+def test_detector_greenlist_cache_capacity_scales_with_python_set_memory():
+    from vllm_watermark.kgw.detector import _greenlist_cache_capacity
+
+    normal = KGWConfig(vocab_size=151_936, gamma=0.25, delta=2.0, hash_key=7)
+    extreme = KGWConfig(vocab_size=1_048_576, gamma=0.5, delta=2.0, hash_key=7)
+    from vllm_watermark.kgw.detector import _GREENLIST_CACHE_BUDGET_BYTES, _PY_SET_BYTES_PER_TOKEN
+    assert _greenlist_cache_capacity(normal) * normal.greenlist_size * _PY_SET_BYTES_PER_TOKEN <= _GREENLIST_CACHE_BUDGET_BYTES
+    assert _greenlist_cache_capacity(extreme) < 32

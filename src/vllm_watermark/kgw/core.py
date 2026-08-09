@@ -94,13 +94,19 @@ model config's vocab_size, not the tokenizer's).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from numbers import Real
 
 import torch
 
 _SUPPORTED_SEEDING_SCHEMES = ("lefthash",)
 _SEED_MODULUS = 1 << 64  # 2**64 -- see "Seed formula deviation" above
 _MAX_HASH_KEY = _SEED_MODULUS - 1  # largest value representable in 64 bits
+_MAX_VOCAB_SIZE = 1 << 20
+_MAX_DELTA = 100.0
+# Deployment-safety ceiling for one cached int64 green-list allocation.
+_MAX_GREENLIST_BYTES = 4 << 20
 
 
 @dataclass(frozen=True)
@@ -109,7 +115,8 @@ class KGWConfig:
 
     Attributes:
         vocab_size: REQUIRED, explicit. See module docstring -- never infer
-            this from a tokenizer or from logits.shape[-1].
+            this from a tokenizer or from logits.shape[-1]. Must be an
+            integer in [1, 2**20].
         hash_key: REQUIRED, explicit. A (secret-derived) 64-bit integer used
             to seed the green-list permutation. Load via keys.py -- never
             hardcode a production value.
@@ -118,6 +125,7 @@ class KGWConfig:
         delta: logit bias added to green-list tokens at generation time.
             Equivalent to transformers' `bias`. Default 2.0. (Unused by the
             detector; carried here so one config value drives both sides.)
+            Must be finite and in [0, 100].
         seeding_scheme: only "lefthash" is implemented. "selfhash"
             (Algorithm 3 in the KGW paper) is rejected -- reserved for a
             later phase.
@@ -134,6 +142,10 @@ class KGWConfig:
     greenlist_size: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if isinstance(self.context_width, bool) or not isinstance(self.context_width, int):
+            raise ValueError(
+                f"context_width must be an integer, got {self.context_width!r}"
+            )
         if self.seeding_scheme not in _SUPPORTED_SEEDING_SCHEMES:
             raise NotImplementedError(
                 f"seeding_scheme={self.seeding_scheme!r} is not implemented; "
@@ -147,16 +159,47 @@ class KGWConfig:
                 f"context_width={self.context_width} is not implemented; "
                 "only context_width=1 is supported by the lefthash port."
             )
+
+        if isinstance(self.gamma, bool) or not isinstance(self.gamma, Real):
+            raise ValueError(f"gamma must be a finite real number, got {self.gamma!r}")
+        if not math.isfinite(self.gamma):
+            raise ValueError(f"gamma must be finite, got {self.gamma}")
         if not (0.0 < self.gamma < 1.0):
             raise ValueError(f"gamma must be in (0.0, 1.0), got {self.gamma}")
-        if self.vocab_size <= 0:
-            raise ValueError(f"vocab_size must be positive, got {self.vocab_size}")
+
+        if isinstance(self.delta, bool) or not isinstance(self.delta, Real):
+            raise ValueError(f"delta must be a finite real number, got {self.delta!r}")
+        if not math.isfinite(self.delta):
+            raise ValueError(f"delta must be finite, got {self.delta}")
+        if not (0.0 <= self.delta <= _MAX_DELTA):
+            raise ValueError(f"delta must be in [0.0, {_MAX_DELTA}], got {self.delta}")
+
+        if isinstance(self.vocab_size, bool) or not isinstance(self.vocab_size, int):
+            raise ValueError(f"vocab_size must be an integer, got {self.vocab_size!r}")
+        if not (1 <= self.vocab_size <= _MAX_VOCAB_SIZE):
+            raise ValueError(
+                f"vocab_size must be in [1, {_MAX_VOCAB_SIZE}], got {self.vocab_size}"
+            )
+
+        if isinstance(self.hash_key, bool) or not isinstance(self.hash_key, int):
+            raise ValueError(f"hash_key must be an integer, got {self.hash_key!r}")
         if not (0 <= self.hash_key <= _MAX_HASH_KEY):
             raise ValueError(
                 f"hash_key must be a non-negative integer < 2**64, got {self.hash_key}"
             )
+
+        greenlist_size = int(self.vocab_size * self.gamma)
+        if greenlist_size < 1:
+            raise ValueError(
+                "effective greenlist_size must be >= 1; increase vocab_size or gamma"
+            )
+        if greenlist_size * torch.tensor([], dtype=torch.int64).element_size() > _MAX_GREENLIST_BYTES:
+            raise ValueError(
+                "effective greenlist allocation exceeds the 4 MiB deployment budget; "
+                "reduce vocab_size or gamma"
+            )
         # frozen dataclass: use object.__setattr__ to set the derived field
-        object.__setattr__(self, "greenlist_size", int(self.vocab_size * self.gamma))
+        object.__setattr__(self, "greenlist_size", greenlist_size)
 
 
 def greenlist_ids(prev_token: int, cfg: KGWConfig) -> torch.LongTensor:
@@ -182,4 +225,7 @@ def greenlist_ids(prev_token: int, cfg: KGWConfig) -> torch.LongTensor:
     generator = torch.Generator()  # no device arg -> CPU, always
     generator.manual_seed(seed)
     vocab_permutation = torch.randperm(cfg.vocab_size, generator=generator)
-    return vocab_permutation[: cfg.greenlist_size]
+    # ``randperm`` owns a vocab-sized storage buffer.  Clone the slice so a
+    # cached greenlist retains only its bounded greenlist allocation rather
+    # than the entire permutation backing storage.
+    return vocab_permutation[: cfg.greenlist_size].clone()

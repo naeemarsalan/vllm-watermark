@@ -61,7 +61,7 @@ At the reviewed detector commit, `detector_params` is declared as
 dependency, omission is therefore expected to produce a validation error;
 that omission case was not executed (`STATIC`; pinned
 [`scheme.py`](https://github.com/trustyai-explainability/guardrails-detectors/blob/747a4d3ef6f7d384b73f929a0162228ad56d98de/detectors/common/scheme.py)
-and [`pyproject.toml`](https://github.com/trustyai-explainability/guardrails-detectors/blob/747a4d3ef6f7d384b73f929a0162228ad56d98de/pyproject.toml)). Send an explicit
+and [`pyproject.toml`](https://github.com/trustyai-explainability/guardrails-detectors/blob/747a4d3ef6f7d384b73f929a0162228ad56d98de/detectors/pyproject.toml)). Send an explicit
 empty object when no detector parameters are needed.
 
 The orchestrator's vendored detector OpenAPI marks `detector-id` as a

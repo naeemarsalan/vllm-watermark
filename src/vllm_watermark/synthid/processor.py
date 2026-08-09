@@ -161,20 +161,20 @@ Env vars this module reads directly (never logged/printed as values):
         vllm_watermark.request_args.resolve_default_scheme()). A row only
         ever activates in THIS processor if the resolved scheme ==
         "synthid" -- see class docstring "SCHEME-COORDINATION DESIGN".
-    VLLM_WATERMARK_SYNTHID_NGRAM_LEN               int >= 1, default "5"
+    VLLM_WATERMARK_SYNTHID_NGRAM_LEN     int in [1, 1024], default "5"
         (matches SynthIDConfig.ngram_len's own default).
     VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE     int, default "65536"
         (2**16, matches SynthIDConfig's own default).
     VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED     int, default "0"
         (matches SynthIDConfig's own default; NOT secret -- see that
         field's docstring in synthid/core.py).
-    VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE    int >= 0, default
+    VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE    int in [0, 65536], default
         "1024" -- per-row repeated-context history window size (see
         DESIGN DECISION 3).
     VLLM_WATERMARK_SYNTHID_SKIP_FIRST_NGRAM_CALLS  "on"/"off", default
         "off" (matches SynthIDConfig's own transformers-sourced default --
         see DESIGN DECISION 2).
-    VLLM_WATERMARK_SYNTHID_KEY_DEPTH   int > 0, default "30"
+    VLLM_WATERMARK_SYNTHID_KEY_DEPTH   int in [1, 256], default "30"
         (vllm_watermark.synthid.core.DEFAULT_SYNTHID_DEPTH) -- number of
         tournament-layer subkeys to derive per configured secret (see
         DESIGN DECISION 5).
@@ -213,7 +213,13 @@ from vllm_watermark.request_args import (
     resolve_key_or_raise,
     resolve_request,
 )
-from vllm_watermark.synthid.core import DEFAULT_SYNTHID_DEPTH, SynthIDConfig, process_scores_row, SYNTHID_KEY_LABEL
+from vllm_watermark.synthid.core import (
+    DEFAULT_SYNTHID_DEPTH,
+    SynthIDConfig,
+    _MAX_DEPTH,
+    process_scores_row,
+    SYNTHID_KEY_LABEL,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -400,10 +406,25 @@ class SynthIDLogitsProcessor(LogitsProcessor):
         self._key_depth = int(
             os.environ.get("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", _DEFAULT_KEY_DEPTH_ENV)
         )
-        if self._key_depth <= 0:
+        if not (1 <= self._key_depth <= _MAX_DEPTH):
             raise ValueError(
-                f"VLLM_WATERMARK_SYNTHID_KEY_DEPTH must be positive, got {self._key_depth}"
+                "VLLM_WATERMARK_SYNTHID_KEY_DEPTH must be in "
+                f"[1, {_MAX_DEPTH}], got {self._key_depth}"
             )
+
+        # Validate every environment-driven setting, plus the model-config
+        # vocabulary, before key loading or the first generation request.
+        # Zero-valued placeholder keys are valid and preserve the requested
+        # depth without deriving or exposing any key material.
+        SynthIDConfig(
+            vocab_size=self._vocab_size,
+            keys=(0,) * self._key_depth,
+            ngram_len=self._ngram_len,
+            sampling_table_size=self._sampling_table_size,
+            sampling_table_seed=self._sampling_table_seed,
+            context_history_size=self._context_history_size,
+            skip_first_ngram_calls=self._skip_first_ngram_calls,
+        )
 
         # Both env vars are shared with vllm_watermark.kgw.processor (same
         # names, same defaults, same parsing) -- see
@@ -605,6 +626,12 @@ class SynthIDLogitsProcessor(LogitsProcessor):
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if not self._rows:
             return logits
+
+        negative_index = next((index for index in self._rows if index < 0), None)
+        if negative_index is not None:
+            raise ValueError(
+                f"SynthIDLogitsProcessor row index must be >= 0, got {negative_index}"
+            )
 
         vocab_width = logits.shape[-1]
         self._check_vocab_width(vocab_width)

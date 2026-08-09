@@ -164,7 +164,7 @@ corpora. They are observations, not universal rates
 | Completed responses selected at <code>N=1</code> | **20 / 20** |
 | Responses selected at <code>N=5</code> | **20 / 100** |
 | Selected records carrying <code>mode=synchronous</code> | **40 / 40** |
-| Tests at the final recorded revision | **288 passed** |
+| Tests at the last cluster-validated revision | **288 passed** |
 
 <code>EXECUTED</code>; [mode-complete fixed matrix](EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09)
 and [detector reconciliation](EXPERIMENTS.md#current-detector-reconciliation-2026-08-09).
@@ -244,6 +244,7 @@ Still unresolved for production (<code>OPEN</code>;
 | [<code>src/vllm_watermark/</code>](src/vllm_watermark/) | KGW and SynthID-Text vLLM processors |
 | [<code>detector/</code>](detector/) | Independent detection service |
 | [<code>validation/</code>](validation/) | Continuous-validation gateway and managed-NeMo integration |
+| [<code>benchmarks/</code>](benchmarks/) | Serving, analysis, fuzz and bounded stress harnesses |
 | [<code>deploy/</code>](deploy/) | Container and OpenShift deployment assets |
 
 ## View the article locally

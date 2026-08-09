@@ -108,7 +108,15 @@ def local_target(source: Path, href: str, root: Path) -> tuple[Path, str] | None
 
 def check_external(url: str) -> str | None:
     clean_url = url.split("#", 1)[0]
-    headers = {"User-Agent": "vllm-watermark-link-check/1.0"}
+    # Some documentation CDNs deny repository-specific crawler identifiers
+    # while accepting a conventional link-checker agent. Keep the repository
+    # URL so operators can identify the source of the request.
+    headers = {
+        "User-Agent": (
+            "GitHub-Link-Checker/1.0 "
+            "(+https://github.com/naeemarsalan/vllm-watermark)"
+        )
+    }
     for method in ("HEAD", "GET"):
         request = Request(clean_url, headers=headers, method=method)
         try:

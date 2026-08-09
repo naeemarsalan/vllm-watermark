@@ -1,3 +1,4 @@
+---
 # EXECUTED (scoped Phase 4 deployment, 2026-08-08): the digest-pinned custom
 # runtime reached the recorded RHOAI ServingRuntime/InferenceService internal
 # predictor path. A rerun requires fresh image and server-side evidence; this
@@ -34,6 +35,7 @@ spec:
     - name: kserve-container
       # EXECUTED 2026-08-08: OpenShift Build watermark-vllm-3 pushed this
       # immutable digest; raw output is recorded in EXPERIMENTS.md.
+      # yamllint disable-line rule:line-length
       image: image-registry.openshift-image-registry.svc:5000/watermark/watermark-vllm@sha256:f8294ee0459869e9659b1178ed91f57a1b52a52c6a5f5f819ca651646b317e4c
       command:
         - python
@@ -76,17 +78,28 @@ spec:
           port: 8080
         failureThreshold: 60
         periodSeconds: 10
+        # STATIC alignment: use the 5-second health-probe timeout selected
+        # after the EXECUTED Phase-0 liveness failure; see EXPERIMENTS.md.
+        timeoutSeconds: 5
       readinessProbe:
         httpGet:
           path: /health
           port: 8080
         periodSeconds: 10
+        # STATIC alignment with the readiness timeout selected after the
+        # EXECUTED Phase-0 liveness failure; see EXPERIMENTS.md.
+        timeoutSeconds: 5
       livenessProbe:
         httpGet:
           path: /health
           port: 8080
-        initialDelaySeconds: 30
+        # STATIC alignment with the 300-second grace used after the EXECUTED
+        # Phase-0 liveness failure; see EXPERIMENTS.md.
+        initialDelaySeconds: 300
         periodSeconds: 30
+        # STATIC alignment with the 10-second liveness timeout selected after
+        # the EXECUTED Phase-0 failure; see EXPERIMENTS.md.
+        timeoutSeconds: 10
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:

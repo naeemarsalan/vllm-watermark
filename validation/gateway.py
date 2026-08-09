@@ -1042,6 +1042,8 @@ class GatewayService:
             "response_id": request.response_id,
             "validation_id": request.validation_id,
             "content_digest": request.content_sha256,
+            "scheme": request.scheme,
+            "key_id": request.key_id,
             "ordinal": ordinal,
             "selected": selected,
             "generation_completion_latency_seconds": generation_seconds,

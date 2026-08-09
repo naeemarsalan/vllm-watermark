@@ -43,10 +43,12 @@ Section map:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pytest
 import torch
+import vllm_watermark.synthid.detector as synthid_detector
 
 # Import via the canonical path: tests/conftest.py has already installed
 # the v0.18.0-accurate stub into sys.modules (or real vllm exists) by the
@@ -71,6 +73,7 @@ from vllm_watermark.synthid.core import (  # noqa: E402
 from vllm_watermark.synthid.detector import (  # noqa: E402
     _context_windows,
     _repeated_context_mask,
+    score_token_ids_weighted_mean,
 )
 from vllm_watermark.keys import load_key  # noqa: E402
 
@@ -113,6 +116,88 @@ def _make_processor(vocab_size=50) -> SynthIDLogitsProcessor:
 
 def _empty_history(maxlen=1024) -> _ContextHistory:
     return _ContextHistory(maxlen=maxlen)
+
+
+# ---------------------------------------------------------------------------
+# SynthIDConfig validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("vocab_size", True),
+        ("vocab_size", 1.0),
+        ("vocab_size", 0),
+        ("vocab_size", (1 << 20) + 1),
+        ("keys", ()),
+        ("keys", (True,)),
+        ("keys", (1.0,)),
+        ("keys", tuple(range(257))),
+        ("ngram_len", True),
+        ("ngram_len", 1.0),
+        ("ngram_len", 0),
+        ("ngram_len", 1025),
+        ("sampling_table_size", True),
+        ("sampling_table_size", 1.0),
+        ("sampling_table_size", 0),
+        ("sampling_table_size", (1 << 21) + 1),
+        ("sampling_table_seed", True),
+        ("sampling_table_seed", 1.0),
+        ("sampling_table_seed", -(1 << 63) - 1),
+        ("sampling_table_seed", 1 << 64),
+        ("context_history_size", True),
+        ("context_history_size", 1.0),
+        ("context_history_size", -1),
+        ("context_history_size", (1 << 16) + 1),
+        ("skip_first_ngram_calls", 0),
+        ("skip_first_ngram_calls", "off"),
+    ],
+)
+def test_synthid_config_rejects_invalid_types_and_bounds(field, bad_value):
+    values = {
+        "vocab_size": 4,
+        "keys": (1,),
+        "ngram_len": 2,
+        "sampling_table_size": 8,
+        "sampling_table_seed": 0,
+        "context_history_size": 2,
+        "skip_first_ngram_calls": False,
+    }
+    values[field] = bad_value
+    with pytest.raises(ValueError):
+        SynthIDConfig(**values)
+
+
+def test_synthid_config_accepts_inclusive_limits_and_minimum_table():
+    cfg = SynthIDConfig(
+        vocab_size=1 << 20,
+        keys=(0,),
+        ngram_len=1024,
+        sampling_table_size=1 << 21,
+        sampling_table_seed=-(1 << 63),
+        context_history_size=16,
+        skip_first_ngram_calls=True,
+    )
+    assert cfg.depth == 1
+    assert cfg.sampling_table_size == 1 << 21
+
+
+def test_synthid_normal_deployment_peak_budget_and_boundary():
+    normal = SynthIDConfig(vocab_size=151_936, keys=tuple(range(30)), ngram_len=5)
+    assert normal.vocab_size == 151_936
+    with pytest.raises(ValueError, match="192 MiB"):
+        SynthIDConfig(vocab_size=32_769, keys=tuple(range(256)), ngram_len=5)
+
+    depth_cfg = SynthIDConfig(vocab_size=1 << 15, keys=(0,) * 256)
+    assert depth_cfg.depth == 256
+
+    upper_seed = SynthIDConfig(
+        vocab_size=1,
+        keys=[0],
+        sampling_table_seed=(1 << 64) - 1,
+    )
+    assert upper_seed.keys == (0,)
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +244,53 @@ def test_init_synthid_env_vars_override_defaults(monkeypatch):
 def test_init_rejects_non_positive_key_depth(monkeypatch):
     monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", "0")
     with pytest.raises(ValueError, match="VLLM_WATERMARK_SYNTHID_KEY_DEPTH"):
+        _make_processor(vocab_size=1000)
+
+
+@pytest.mark.parametrize(
+    ("env_name", "bad_value", "vocab_size"),
+    [
+        ("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", "0", 1000),
+        ("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", "1025", 1000),
+        ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE", "0", 1000),
+        ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE", str((1 << 21) + 1), 1000),
+        ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED", str(-(1 << 63) - 1), 1000),
+        ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED", str(1 << 64), 1000),
+        ("VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE", "-1", 1000),
+        ("VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE", str((1 << 16) + 1), 1000),
+        ("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", "257", 1000),
+        (None, None, (1 << 20) + 1),
+    ],
+)
+def test_init_rejects_invalid_synthid_generation_bounds(
+    monkeypatch, env_name, bad_value, vocab_size
+):
+    if env_name is not None:
+        monkeypatch.setenv(env_name, bad_value)
+    with pytest.raises(ValueError):
+        _make_processor(vocab_size=vocab_size)
+
+
+def test_init_accepts_compatible_synthid_generation_boundaries(monkeypatch):
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", "1024")
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE", str(1 << 21))
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED", str((1 << 64) - 1))
+    # The scalar maxima are not all jointly admissible: the context product
+    # and the three-matrix peak have separate cross-parameter budgets.
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE", "16")
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", "256")
+    processor = _make_processor(vocab_size=1 << 15)
+    assert processor._key_depth == 256
+
+
+def test_init_rejects_cross_parameter_synthid_allocation_budgets(monkeypatch):
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", "256")
+    with pytest.raises(ValueError, match="192 MiB"):
+        _make_processor(vocab_size=1 << 20)
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", "30")
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", "1024")
+    monkeypatch.setenv("VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE", str(1 << 16))
+    with pytest.raises(ValueError, match="16384-token"):
         _make_processor(vocab_size=1000)
 
 
@@ -610,6 +742,81 @@ def test_apply_skips_out_of_range_row_index(monkeypatch):
     logits = torch.zeros(2, 20)
     out = processor.apply(logits)  # must not raise
     assert torch.equal(out, torch.zeros(2, 20))
+
+
+def test_apply_rejects_negative_row_index(monkeypatch):
+    monkeypatch.setenv("WATERMARK_KEY", _DUMMY_SECRET)
+    processor = _make_processor(vocab_size=20)
+    params = _FakeSamplingParams(
+        extra_args={"watermark": "on", "watermark_scheme": "synthid"}
+    )
+    added = [(0, params, None, [1]), (-1, params, None, [1])]
+    processor.update_state(BatchUpdate(batch_size=2, removed=[], added=added, moved=[]))
+    logits = torch.zeros(1, 20)
+
+    with pytest.raises(ValueError, match="row index must be >= 0"):
+        processor.apply(logits)
+    assert torch.equal(logits, torch.zeros(1, 20))
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        [float("nan"), 1.0],
+        [float("inf"), 1.0],
+        [-1.0, 1.0],
+        [0.0, 0.0],
+    ],
+)
+def test_weighted_detector_rejects_unsafe_weights(weights):
+    cfg = SynthIDConfig(
+        vocab_size=20,
+        keys=(1, 2),
+        ngram_len=2,
+        sampling_table_size=32,
+    )
+    with pytest.raises(ValueError, match="weights"):
+        score_token_ids_weighted_mean([1, 2, 3, 4], cfg, weights=weights)
+
+
+def test_weighted_detector_accepts_zero_weight_when_sum_is_positive():
+    cfg = SynthIDConfig(
+        vocab_size=20,
+        keys=(1, 2),
+        ngram_len=2,
+        sampling_table_size=32,
+    )
+    result = score_token_ids_weighted_mean([1, 2, 3, 4], cfg, weights=[0.0, 1.0])
+    assert result.num_scored == 3
+
+
+def test_weighted_detector_clamps_roundoff_and_uses_clamped_score(monkeypatch):
+    cfg = SynthIDConfig(
+        vocab_size=20,
+        keys=(1, 2),
+        ngram_len=2,
+        sampling_table_size=32,
+    )
+    monkeypatch.setattr(
+        synthid_detector,
+        "_collect_g_values",
+        lambda _token_ids, _cfg: torch.ones((3, 2), dtype=torch.int64),
+    )
+    weights = [5.1462091318394434e206, 2.6051456448675214e201]
+    result = synthid_detector.score_token_ids_weighted_mean(
+        [1, 2], cfg, weights=weights
+    )
+
+    normalized = torch.tensor(weights, dtype=torch.float64)
+    normalized = normalized / normalized.max()
+    normalized = normalized * (cfg.depth / normalized.sum())
+    raw_score = normalized.sum().item() / cfg.depth
+    assert raw_score > 1.0  # regression precondition: float reduction overshoots
+    assert result.score == 1.0
+    se = math.sqrt(0.25 * (normalized**2).sum().item()) / (
+        cfg.depth * math.sqrt(3)
+    )
+    assert result.z_score == (1.0 - 0.5) / se
 
 
 def test_apply_narrower_logits_than_vocab_size_asserts(monkeypatch):

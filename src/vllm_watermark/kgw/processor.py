@@ -86,16 +86,17 @@ Env vars this module reads directly (never logged/printed as values):
         "SCHEME-COORDINATION DESIGN". Shared with
         vllm_watermark.synthid.processor (same name/default/parsing).
     VLLM_WATERMARK_GAMMA    float in (0, 1), default "0.25"
-    VLLM_WATERMARK_DELTA    float, default "2.0"
-    VLLM_WATERMARK_CACHE_SIZE  int >= 0, default "1024" -- LRU size of the
+    VLLM_WATERMARK_DELTA    finite float in [0, 100], default "2.0"
+    VLLM_WATERMARK_CACHE_SIZE  int in [0, 128], default "128" -- LRU size of the
         greenlist memo cache, keyed (hash_key, prev_token). Pure
         memoization of greenlist_ids() (identical outputs, measured-equal
         statistics); exists because torch.randperm(vocab_size) on CPU costs
         ~7 ms at vocab 151936 and dominated decode latency in the Phase 1
         benchmark (3.2x slowdown uncached, see EXPERIMENTS.md 2026-08-08).
         Zipfian token frequency makes a small LRU highly effective. Memory
-        bound: one CPU int64 tensor of gamma*vocab_size ids per entry
-        (~300 KB at gamma 0.25 / vocab 151936 -> ~300 MB at 1024 entries).
+        bound: the configured cache must fit within a 64 MiB aggregate int64
+        green-list budget (the default 128 entries is safe for the recorded
+        151936-token vocabulary at gamma 0.25).
         0 disables caching.
     (key material itself is loaded via vllm_watermark.keys -- WATERMARK_KEYS
     / WATERMARK_KEY / WATERMARK_KEY_ID -- never read directly by this file)
@@ -159,6 +160,8 @@ __all__ = ["KGWLogitsProcessor", "RowState"]
 
 _DEFAULT_GAMMA_ENV = "0.25"
 _DEFAULT_DELTA_ENV = "2.0"
+_MAX_CACHE_SIZE = 128
+_MAX_CACHE_BYTES = 64 << 20
 
 
 @dataclass
@@ -282,6 +285,16 @@ class KGWLogitsProcessor(LogitsProcessor):
 
         self._gamma = float(os.environ.get("VLLM_WATERMARK_GAMMA", _DEFAULT_GAMMA_ENV))
         self._delta = float(os.environ.get("VLLM_WATERMARK_DELTA", _DEFAULT_DELTA_ENV))
+        # Validate the process-global generation settings at engine init,
+        # including the model-config vocabulary and the effective
+        # greenlist size. hash_key=0 is a validation-only placeholder;
+        # each active row supplies its resolved secret-derived key later.
+        KGWConfig(
+            vocab_size=self._vocab_size,
+            hash_key=0,
+            gamma=self._gamma,
+            delta=self._delta,
+        )
         # Both env vars are shared with vllm_watermark.synthid.processor
         # (same names, same defaults, same parsing) -- see
         # vllm_watermark.request_args module docstring.
@@ -322,10 +335,22 @@ class KGWLogitsProcessor(LogitsProcessor):
         # greenlist_ids(prev_token, cfg) results (CPU LongTensor), keyed by
         # everything the result depends on besides process-global gamma/
         # vocab_size (constant for this instance): (hash_key, prev_token).
-        self._cache_size = int(os.environ.get("VLLM_WATERMARK_CACHE_SIZE", "1024"))
-        if self._cache_size < 0:
+        self._cache_size = int(os.environ.get("VLLM_WATERMARK_CACHE_SIZE", "128"))
+        if not (0 <= self._cache_size <= _MAX_CACHE_SIZE):
             raise ValueError(
-                f"VLLM_WATERMARK_CACHE_SIZE must be >= 0, got {self._cache_size}"
+                "VLLM_WATERMARK_CACHE_SIZE must be in "
+                f"[0, {_MAX_CACHE_SIZE}], got {self._cache_size}"
+            )
+        greenlist_bytes = KGWConfig(
+            vocab_size=self._vocab_size,
+            hash_key=0,
+            gamma=self._gamma,
+            delta=self._delta,
+        ).greenlist_size * torch.tensor([], dtype=torch.int64).element_size()
+        if self._cache_size * greenlist_bytes > _MAX_CACHE_BYTES:
+            raise ValueError(
+                "VLLM_WATERMARK_CACHE_SIZE multiplied by greenlist allocation "
+                "exceeds the 64 MiB deployment budget"
             )
         self._greenlist_cache: "OrderedDict[tuple[int, int], torch.Tensor]" = OrderedDict()
 
@@ -529,6 +554,12 @@ class KGWLogitsProcessor(LogitsProcessor):
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if not self._rows:
             return logits
+
+        negative_index = next((index for index in self._rows if index < 0), None)
+        if negative_index is not None:
+            raise ValueError(
+                f"KGWLogitsProcessor row index must be >= 0, got {negative_index}"
+            )
 
         vocab_width = logits.shape[-1]
         self._check_vocab_width(vocab_width)

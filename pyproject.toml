@@ -57,4 +57,4 @@ where = ["src"]
 # (reproduced 2026-08-08; see EXPERIMENTS.md raw-evidence addendum).
 # importlib mode gives each file a unique module identity instead.
 addopts = "--import-mode=importlib"
-testpaths = ["tests", "detector/tests"]
+testpaths = ["tests", "detector/tests", "validation/tests"]

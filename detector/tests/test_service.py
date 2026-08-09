@@ -38,6 +38,7 @@ import uuid
 
 import jwt
 import pytest
+from fastapi import HTTPException
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
@@ -123,6 +124,30 @@ def client(base_env):
 
 
 class TestContentsEndpoint:
+    def test_admission_limits_are_deterministic(self):
+        with pytest.raises(HTTPException) as exc:
+            detector_app._validate_raw_request_limits(["x"] * (detector_app._MAX_DETECT_BATCH + 1))
+        assert exc.value.status_code == 413
+        with pytest.raises(HTTPException) as exc:
+            detector_app._validate_raw_request_limits(["x" * (detector_app._MAX_RAW_CHARS_PER_TEXT + 1)])
+        assert exc.value.status_code == 413
+        with pytest.raises(HTTPException) as exc:
+            detector_app._validate_raw_request_limits(["x"] * detector_app._MAX_DETECT_BATCH + ["x"])
+        assert exc.value.status_code == 413
+        with pytest.raises(HTTPException) as exc:
+            detector_app._validate_raw_request_limits(
+                ["x" * (detector_app._MAX_RAW_CHARS_TOTAL // 8 + 1)] * 8
+            )
+        assert exc.value.status_code == 413
+        with pytest.raises(HTTPException) as exc:
+            detector_app._validate_token_limits([[0] * (detector_app._MAX_TOKENS_PER_TEXT + 1)])
+        assert exc.value.status_code == 413
+        with pytest.raises(HTTPException) as exc:
+            detector_app._validate_token_limits(
+                [[0] * (detector_app._MAX_TOKENS_TOTAL // 4 + 1)] * 4
+            )
+        assert exc.value.status_code == 413
+
     def test_watermarked_text_detected_above_threshold(self, client):
         wm_text = _make_kgw_watermarked_text(client.app.state)
         resp = client.post("/api/v1/text/contents", json={"contents": [wm_text]})
@@ -365,6 +390,19 @@ class TestDetectEndpoint:
         assert body["results"][1]["verdict"] is False
         assert body["signing"] == "disabled"
 
+    def test_batch_texts_enforces_aggregate_token_limit(self, client, monkeypatch):
+        monkeypatch.setattr(detector_app, "_MAX_TOKENS_TOTAL", 3)
+        monkeypatch.setattr(
+            client.app.state.tokenizer,
+            "encode",
+            lambda text, add_special_tokens=False: [1, 2],
+        )
+
+        resp = client.post("/v1/watermark/detect", json={"texts": ["one", "two"]})
+
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "detector batch has too many tokens"}
+
     def test_unknown_key_id_400(self, client):
         resp = client.post("/v1/watermark/detect", json={"text": CLEAN_TEXT, "key_id": "does-not-exist"})
         assert resp.status_code == 400
@@ -580,6 +618,9 @@ class TestHealthReady:
                 return tokenizer_size
 
         base_env.delenv("WATERMARK_VOCAB_SIZE", raising=False)
+        # At maximum vocabulary, depth 8 is the largest value admitted by the
+        # three-matrix 192 MiB cross-parameter budget.
+        base_env.setenv("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", "8")
         monkeypatch.setattr(detector_app.AutoTokenizer, "from_pretrained", lambda _: StubTokenizer())
         with TestClient(detector_app.create_app()) as client:
             assert client.get("/ready").status_code == 200
@@ -644,6 +685,20 @@ _NUMERIC_INVALID_CASES = (
 )
 
 
+def _compatible_maximum_environment(name, accepted):
+    """Return an environment where one scalar maximum fits all cross-budgets."""
+    env = {name: str(accepted)}
+    if name == "WATERMARK_VOCAB_SIZE":
+        env["VLLM_WATERMARK_SYNTHID_KEY_DEPTH"] = "8"
+    elif name == "VLLM_WATERMARK_SYNTHID_NGRAM_LEN":
+        env["VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE"] = "16"
+    elif name == "VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE":
+        env["VLLM_WATERMARK_SYNTHID_NGRAM_LEN"] = "1"
+    elif name == "VLLM_WATERMARK_SYNTHID_KEY_DEPTH":
+        env["WATERMARK_VOCAB_SIZE"] = str(1 << 15)
+    return env
+
+
 class TestStartupConfigurationValidation:
     @pytest.mark.parametrize(("name", "value"), _NUMERIC_INVALID_CASES)
     def test_every_numeric_setting_rejects_invalid_values_at_startup(self, name, value):
@@ -696,7 +751,9 @@ class TestStartupConfigurationValidation:
 
     @pytest.mark.parametrize(("name", "accepted", "overflow"), _NUMERIC_MAX_CASES)
     def test_numeric_setting_maximum_is_accepted_by_load_settings(self, name, accepted, overflow):
-        settings = detector_app.load_settings({name: str(accepted)})
+        settings = detector_app.load_settings(
+            _compatible_maximum_environment(name, accepted)
+        )
         assert settings is not None
 
     @pytest.mark.parametrize(("name", "accepted", "overflow"), _NUMERIC_MAX_CASES)
@@ -711,7 +768,8 @@ class TestStartupConfigurationValidation:
         # A stub keeps this startup-boundary test independent of the local HF
         # cache; no request is made, so tokenizer behavior is out of scope.
         monkeypatch.setattr(detector_app.AutoTokenizer, "from_pretrained", lambda _: object())
-        base_env.setenv(name, str(accepted))
+        for env_name, env_value in _compatible_maximum_environment(name, accepted).items():
+            base_env.setenv(env_name, env_value)
         with TestClient(detector_app.create_app()) as client:
             assert client.get("/health").status_code == 200
             assert client.get("/ready").status_code == 200

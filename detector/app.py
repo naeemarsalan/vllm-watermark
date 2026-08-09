@@ -299,13 +299,21 @@ _DEFAULT_SYNTHID_KEY_DEPTH_ENV = str(DEFAULT_SYNTHID_DEPTH)
 # SynthID's g-value path does work proportional to key depth.  The caps leave
 # ample headroom over the recorded deployment (vocab 151,936; ngram 5;
 # history 1,024; depth 30) while preventing accidental host-memory/CPU blowups.
-_MAX_WATERMARK_VOCAB_SIZE = 1 << 20  # 1,048,576 int64 ids (~8 MiB per permutation)
+_MAX_WATERMARK_VOCAB_SIZE = 1 << 20  # deployment cap, not algorithm compatibility
 _MAX_WATERMARK_Z_THRESHOLD = 100.0  # far beyond ordinary detector z-scores
 _MAX_KGW_DELTA = 100.0  # larger logit biases are numerically saturated in practice
 _MAX_SYNTHID_NGRAM_LEN = 1 << 10  # bounds each context tuple to 1,024 token ids
 _MAX_SYNTHID_CONTEXT_HISTORY_SIZE = 1 << 16  # bounds the per-request history window
 _MAX_SYNTHID_KEY_DEPTH = 1 << 8  # bounds per-token tournament layers/key derivation
-_MAX_SYNTHID_SAMPLING_TABLE_SIZE = 1 << 24
+_MAX_SYNTHID_SAMPLING_TABLE_SIZE = 1 << 21  # 16 MiB int64 table per cache entry
+_MAX_KGW_GREENLIST_BYTES = 4 << 20
+_MAX_SYNTHID_G_VALUES_BYTES = 192 << 20
+_MAX_SYNTHID_CONTEXT_TOKENS = 1 << 14
+_MAX_DETECT_BATCH = 32
+_MAX_RAW_CHARS_PER_TEXT = 1 << 20
+_MAX_RAW_CHARS_TOTAL = 4 << 20
+_MAX_TOKENS_PER_TEXT = 1 << 17
+_MAX_TOKENS_TOTAL = 1 << 18
 _MIN_TORCH_SEED = -(1 << 63)
 _MAX_TORCH_SEED = (1 << 64) - 1
 
@@ -506,7 +514,7 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         signing_key_id=env.get("SIGNING_KEY_ID") or None,
     )
     if settings.vocab_size_env is not None:
-        _validate_kgw_greenlist_size(settings.vocab_size_env, settings.kgw_gamma)
+        _validate_resource_budgets(settings.vocab_size_env, settings)
     return settings
 
 
@@ -518,6 +526,19 @@ def _validate_kgw_greenlist_size(vocab_size: int, gamma: float) -> None:
             "effective KGW greenlist_size must be >= 1; increase WATERMARK_VOCAB_SIZE "
             "or VLLM_WATERMARK_GAMMA"
         )
+    if greenlist_size * 8 > _MAX_KGW_GREENLIST_BYTES:
+        raise RuntimeError("effective KGW greenlist exceeds the 4 MiB deployment budget")
+
+
+def _validate_resource_budgets(vocab_size: int, settings: Settings) -> None:
+    """Reject cross-parameter combinations before detector allocations."""
+    _validate_kgw_greenlist_size(vocab_size, settings.kgw_gamma)
+    if settings.synthid_sampling_table_size * 8 > 16 << 20:
+        raise RuntimeError("SynthID sampling table exceeds the 16 MiB deployment budget")
+    if 3 * vocab_size * settings.synthid_key_depth * 8 > _MAX_SYNTHID_G_VALUES_BYTES:
+        raise RuntimeError("three SynthID vocab-by-depth matrices exceed the 192 MiB g-value budget")
+    if settings.synthid_context_history_size * max(0, settings.synthid_ngram_len - 1) > _MAX_SYNTHID_CONTEXT_TOKENS:
+        raise RuntimeError("SynthID context history token capacity exceeds the 16384-token per-row deployment budget")
 
 
 def _validate_tokenizer_vocab_size(vocab_size: int, gamma: float) -> int:
@@ -529,8 +550,34 @@ def _validate_tokenizer_vocab_size(vocab_size: int, gamma: float) -> int:
             "tokenizer vocabulary size must be in [1, "
             f"{_MAX_WATERMARK_VOCAB_SIZE}]"
         )
-    _validate_kgw_greenlist_size(vocab_size, gamma)
+    # The tokenizer-derived vocabulary is subject to the same deployment
+    # resource budget as an explicitly configured vocabulary.
     return vocab_size
+
+
+def _validate_raw_request_limits(contents: List[str]) -> None:
+    """Reject oversized detector batches before tokenizer work (HTTP 413)."""
+    if len(contents) > _MAX_DETECT_BATCH:
+        raise HTTPException(status_code=413, detail="detector batch is too large")
+    total = 0
+    for content in contents:
+        chars = len(content)
+        if chars > _MAX_RAW_CHARS_PER_TEXT:
+            raise HTTPException(status_code=413, detail="detector text is too large")
+        total += chars
+    if total > _MAX_RAW_CHARS_TOTAL:
+        raise HTTPException(status_code=413, detail="detector batch text is too large")
+
+
+def _validate_token_limits(token_batches: List[List[int]]) -> None:
+    """Reject oversized tokenized inputs before detector scoring (HTTP 413)."""
+    total = 0
+    for token_ids in token_batches:
+        if len(token_ids) > _MAX_TOKENS_PER_TEXT:
+            raise HTTPException(status_code=413, detail="detector text has too many tokens")
+        total += len(token_ids)
+    if total > _MAX_TOKENS_TOTAL:
+        raise HTTPException(status_code=413, detail="detector batch has too many tokens")
 
 
 def _load_signing_key(path: Optional[str]):
@@ -809,6 +856,7 @@ def _analyze_contents_sync(
     loop free during detector inference (see module docstring citation).
     """
     settings: Settings = state.settings
+    _validate_raw_request_limits(contents)
     keys: Dict[str, WatermarkKey] = state.keys
     if not keys:
         raise HTTPException(status_code=503, detail="no watermark keys configured")
@@ -820,12 +868,13 @@ def _analyze_contents_sync(
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    token_batches = [state.tokenizer.encode(content, add_special_tokens=False) for content in contents]
+    _validate_token_limits(token_batches)
+
     results: List[List[ContentAnalysisResponse]] = []
-    for content in contents:
+    for content, token_ids in zip(contents, token_batches):
         t0 = time.monotonic()
         digest = _content_digest(content)
-        token_ids = state.tokenizer.encode(content, add_special_tokens=False)
-
         try:
             scored = score_token_ids(token_ids, scheme, key, settings, state.vocab_size)
         except InsufficientTokensError:
@@ -963,11 +1012,14 @@ def _build_detect_result(
     validation_id: Optional[str] = None,
     response_id: Optional[str] = None,
     index: Optional[int] = None,
+    token_ids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     digest = _content_digest(text)
     content_sha256 = _content_sha256(text)
     t0 = time.monotonic()
-    token_ids = state.tokenizer.encode(text, add_special_tokens=False)
+    if token_ids is None:
+        token_ids = state.tokenizer.encode(text, add_special_tokens=False)
+    _validate_token_limits([token_ids])
     try:
         scored = score_token_ids(token_ids, scheme, key, settings, state.vocab_size)
     except InsufficientTokensError as exc:
@@ -1040,6 +1092,8 @@ async def _lifespan(app: FastAPI):
             "be silently near-zero -- see app.py module docstring 'WATERMARK_VOCAB_SIZE'.",
             app.state.vocab_size,
         )
+
+    _validate_resource_budgets(app.state.vocab_size, settings)
 
     try:
         app.state.keys = load_keys()
@@ -1119,6 +1173,7 @@ def create_app() -> FastAPI:
     @app.post("/v1/watermark/detect")
     async def watermark_detect(req: DetectRequest, request: Request) -> Dict[str, Any]:
         state = request.app.state
+        _validate_raw_request_limits([req.text] if req.text is not None else (req.texts or []))
         settings: Settings = state.settings
         scheme = req.scheme or settings.default_scheme
 
@@ -1167,9 +1222,24 @@ def create_app() -> FastAPI:
             texts = req.texts or []
 
             def _build_all() -> List[Dict[str, Any]]:
+                token_batches = [
+                    state.tokenizer.encode(text, add_special_tokens=False)
+                    for text in texts
+                ]
+                _validate_token_limits(token_batches)
                 return [
-                    _build_detect_result(t, scheme, key, settings, state, index=i)
-                    for i, t in enumerate(texts)
+                    _build_detect_result(
+                        text,
+                        scheme,
+                        key,
+                        settings,
+                        state,
+                        index=index,
+                        token_ids=token_ids,
+                    )
+                    for index, (text, token_ids) in enumerate(
+                        zip(texts, token_batches)
+                    )
                 ]
 
             results = await run_in_threadpool(_build_all)

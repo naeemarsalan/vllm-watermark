@@ -245,7 +245,7 @@ the linked scheme-comparison evidence.
 ## Phase 3 — Detection service + current guardrails-path confirmation (addresses D5)
 
 - The detector service exposes the historical FMS contract, `POST /api/v1/text/contents`, and a direct endpoint returning `{z_score, p_value, verdict, key_id, detector_version}` with an Ed25519-JWS-signed result. Both were exercised on OpenShift (`EXECUTED`, fact D5 and the [Phase 3 experiment](../EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half)). Signing is an engineering feature here, not a claimed legal requirement (`OPEN`).
-- The FMS Guardrails Orchestrator routed KGW and SynthID requests to the detector, and an upstream `nemoguardrails==0.23.0` custom output-rail action called it (`EXECUTED`, fact D5 and the "NeMo PoC hardening evidence" transcript in the [append-only evidence log](../EXPERIMENTS.md)). Malformed-200 fail-closed behavior was executed; the committed detector-outage branch is `STATIC` and its live behavior remains `OPEN` because no outage command/raw output was preserved (fact D5).
+- The FMS Guardrails Orchestrator routed KGW and SynthID requests to the detector, and an upstream `nemoguardrails==0.23.0` custom output-rail action called it (`EXECUTED`, fact D5 and the "NeMo PoC hardening evidence" transcript in the [append-only evidence log](../EXPERIMENTS.md)). Malformed-200 fail-closed behavior executed in that earlier upstream-NeMo scope. The current managed-NeMo/broker path also executed a real detector outage: three attempts were exhausted and the synchronous gateway returned a content-free 503 (`EXECUTED`, fact D5 and the [current-path evidence](../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)). Platform-wide outage behavior remains `OPEN`.
 - RHOAI 3.4 labels FMS Guardrails legacy and directs users to NeMo Guardrails (`OFFICIAL-SRC`, fact C11). The RHOAI-managed `NemoGuardrails` custom-resource path, shipped image, former fixed-action block/pass behavior, and controlled detector-outage fail-closed result executed; the finite retention scan was also executed, but platform-wide retention and supportability remain `OPEN` (`EXECUTED` / `OPEN`, facts C11/D5/D6; [recovered evidence](../EXPERIMENTS.md#2026-08-08--phase-4-rhoai-exact-transcript-recovered-executed-redacted)).
 - The detector is designed to avoid storing submitted content and its application logs contain hashes plus verdict metadata; the executed evidence is scoped to the detector logs inspected in Phase 3 (`STATIC` / `EXECUTED`, fact D5 and the [Phase 3 experiment](../EXPERIMENTS.md#2026-08-08--phase-3-detector-service--fms-guardrailsorchestrator-end-to-end-closes-d5s-executable-half)). End-to-end retention behavior and mitigation remain `OPEN` under D5; this engineering evidence makes no legal conclusion.
 
@@ -323,10 +323,12 @@ robustness/key-management work remain `OPEN` ([facts D2–D4 and D9–D10](facts
   add a byte-bounded broker response read to the embedded managed-NeMo action; and add
   concrete transport/mismatch/cancellation regression coverage (`OPEN`; [review
   follow-ups](../EXPERIMENTS.md#2026-08-09--post-execution-adversarial-review-follow-ups-staticopen)).
-- Detector/generator production hardening remains `OPEN`: bound direct detector
-  request size and KGW per-request cache growth, assess expensive maximum SynthID
-  configurations, and apply equivalent upper-bound validation to the generation-side
-  processors (`STATIC`/`OPEN`; [detector bounds review](../EXPERIMENTS.md#current-detector-reconciliation-2026-08-09)).
+- Detector/generator resource hardening is implemented in the current local source:
+  direct requests, tokenized batches, KGW caches, SynthID tables/matrices/context,
+  and generation-side configurations have explicit ceilings (`STATIC`), with local
+  regression and fuzz/stress execution recorded in [fact FZ1](facts.md). The changed
+  runtime image has not been rebuilt or exercised on the cluster, and production
+  workload sizing, GPU profiling, and broader adversarial robustness remain `OPEN`.
 - Compliance mapping doc: map the exact quoted Code language and sources in [`docs/quotes.md`](quotes.md) to what this implementation does (`OJ-VERBATIM` for the source text; implementation status tagged separately). The `EXPERIMENTS.md` log may contribute to required documentation only if it meets the applicable requirements; keep it audit-grade.
 
 **Acceptance status:** the D9 and D10 portions are met with command/raw evidence

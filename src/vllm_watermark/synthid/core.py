@@ -20,8 +20,9 @@ Attribution / upstream sources
 2. transformers.generation.configuration_utils.SynthIDTextWatermarkingConfig
        (file: generation/configuration_utils.py, lines 1339-1420ish)
    -- field *defaults* only (sampling_table_size=2**16, sampling_table_seed=0,
-   context_history_size=1024, skip_first_ngram_calls=False) and its
-   `validate()` bound `sampling_table_size <= 2**24` (ported below verbatim).
+   context_history_size=1024, skip_first_ngram_calls=False). Upstream permits
+   `sampling_table_size <= 2**24`; this deployment intentionally applies the
+   lower resource ceiling documented beside `_MAX_SAMPLING_TABLE_SIZE`.
 3. google-deepmind/synthid-text, tag 0.2.1, commit
    8f2e2316904ea7291ac96e30eb394c453dcc577b (verified via
    `gh api repos/google-deepmind/synthid-text/tags` / raw.githubusercontent.com,
@@ -140,6 +141,7 @@ own ordering relative to temperature -- that decision is out of scope here
 from __future__ import annotations
 
 import functools
+import itertools
 from dataclasses import dataclass, field
 
 import torch
@@ -169,9 +171,20 @@ SYNTHID_KEY_LABEL = b"vllm-watermark:synthid-subkeys:v1"
 _LCG_MULTIPLIER = 6364136223846793005
 _LCG_INCREMENT = 1
 
-# DeepMind SynthIDTextWatermarkingConfig.validate() bound (configuration_utils.py
-# ~line 1407-1414): "sampling_table_size should be < 2**24".
-_MAX_SAMPLING_TABLE_SIZE = 1 << 24
+# Deployment cap: 2**21 int64 entries is 16 MiB per sampling table. The
+# upstream algorithm accepts larger tables, but this package does not permit
+# allocation-proportional maxima without an explicit resource profile.
+_MAX_SAMPLING_TABLE_SIZE = 1 << 21
+_MAX_VOCAB_SIZE = 1 << 20
+_MAX_NGRAM_LEN = 1 << 10
+_MAX_CONTEXT_HISTORY_SIZE = 1 << 16
+_MAX_DEPTH = 1 << 8
+_MIN_TORCH_SEED = -(1 << 63)
+_MAX_TORCH_SEED = (1 << 64) - 1
+# Cross-parameter deployment budgets, not algorithmic compatibility limits.
+_MAX_SAMPLING_TABLE_BYTES = 16 << 20
+_MAX_G_VALUES_BYTES = 192 << 20  # deployment peak cap for three int64 matrices
+_MAX_CONTEXT_TOKENS = 1 << 14  # per row; scheduler batch multiplies this
 
 
 @dataclass(frozen=True)
@@ -231,31 +244,101 @@ class SynthIDConfig:
     depth: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if isinstance(self.vocab_size, bool) or not isinstance(self.vocab_size, int):
+            raise ValueError(f"vocab_size must be an integer, got {self.vocab_size!r}")
+        if not (1 <= self.vocab_size <= _MAX_VOCAB_SIZE):
+            raise ValueError(
+                f"vocab_size must be in [1, {_MAX_VOCAB_SIZE}], got {self.vocab_size}"
+            )
+
+        if isinstance(self.keys, (str, bytes)):
+            raise ValueError("keys must be an iterable of integers")
         if not isinstance(self.keys, tuple):
-            object.__setattr__(self, "keys", tuple(self.keys))
-        if self.vocab_size <= 0:
-            raise ValueError(f"vocab_size must be positive, got {self.vocab_size}")
+            try:
+                keys = tuple(itertools.islice(iter(self.keys), _MAX_DEPTH + 1))
+            except TypeError as exc:
+                raise ValueError("keys must be an iterable of integers") from exc
+            object.__setattr__(self, "keys", keys)
         if not self.keys:
             raise ValueError("keys must be a non-empty sequence (one per tournament layer)")
+        if len(self.keys) > _MAX_DEPTH:
+            raise ValueError(
+                f"keys must contain at most {_MAX_DEPTH} entries (depth <= 256), "
+                f"got {len(self.keys)}"
+            )
         for k in self.keys:
-            if not isinstance(k, int) or not (0 <= k < (1 << 63)):
+            if isinstance(k, bool) or not isinstance(k, int) or not (0 <= k < (1 << 63)):
                 raise ValueError(
                     f"each key must be an int in [0, 2**63) (fits signed int64), got {k!r}"
                 )
-        if self.ngram_len < 1:
-            raise ValueError(f"ngram_len must be >= 1, got {self.ngram_len}")
-        if self.sampling_table_size <= 0:
-            raise ValueError(f"sampling_table_size must be positive, got {self.sampling_table_size}")
-        if self.sampling_table_size > _MAX_SAMPLING_TABLE_SIZE:
-            # Ported bound: transformers' SynthIDTextWatermarkingConfig.validate()
-            # (generation/configuration_utils.py) rejects sampling_table_size > 2**24.
+
+        if isinstance(self.ngram_len, bool) or not isinstance(self.ngram_len, int):
+            raise ValueError(f"ngram_len must be an integer, got {self.ngram_len!r}")
+        if not (1 <= self.ngram_len <= _MAX_NGRAM_LEN):
             raise ValueError(
-                f"sampling_table_size must be <= {_MAX_SAMPLING_TABLE_SIZE} (2**24), "
+                f"ngram_len must be in [1, {_MAX_NGRAM_LEN}], got {self.ngram_len}"
+            )
+
+        if isinstance(self.sampling_table_size, bool) or not isinstance(
+            self.sampling_table_size, int
+        ):
+            raise ValueError(
+                f"sampling_table_size must be an integer, got {self.sampling_table_size!r}"
+            )
+        if not (1 <= self.sampling_table_size <= _MAX_SAMPLING_TABLE_SIZE):
+            # Upstream permits values through 2**24. This implementation uses
+            # the lower 2**21 ceiling to enforce its 16 MiB per-table budget.
+            raise ValueError(
+                f"sampling_table_size must be in [1, {_MAX_SAMPLING_TABLE_SIZE}] (2**21), "
                 f"got {self.sampling_table_size}"
             )
-        if self.context_history_size < 0:
+        if self.sampling_table_size * torch.tensor([], dtype=torch.int64).element_size() > _MAX_SAMPLING_TABLE_BYTES:
             raise ValueError(
-                f"context_history_size must be >= 0, got {self.context_history_size}"
+                "sampling_table_size exceeds the 16 MiB per-table deployment budget"
+            )
+
+        if isinstance(self.sampling_table_seed, bool) or not isinstance(
+            self.sampling_table_seed, int
+        ):
+            raise ValueError(
+                f"sampling_table_seed must be an integer, got {self.sampling_table_seed!r}"
+            )
+        if not (_MIN_TORCH_SEED <= self.sampling_table_seed <= _MAX_TORCH_SEED):
+            raise ValueError(
+                "sampling_table_seed must be in torch.Generator.manual_seed range "
+                f"[-2**63, 2**64 - 1], got {self.sampling_table_seed}"
+            )
+
+        if isinstance(self.context_history_size, bool) or not isinstance(
+            self.context_history_size, int
+        ):
+            raise ValueError(
+                f"context_history_size must be an integer, got {self.context_history_size!r}"
+            )
+        if not (0 <= self.context_history_size <= _MAX_CONTEXT_HISTORY_SIZE):
+            raise ValueError(
+                f"context_history_size must be in [0, {_MAX_CONTEXT_HISTORY_SIZE}], "
+                f"got {self.context_history_size}"
+            )
+        if self.context_history_size * max(0, self.ngram_len - 1) > _MAX_CONTEXT_TOKENS:
+            raise ValueError(
+                "context history token capacity exceeds the 16384-token per-row deployment budget"
+            )
+
+        if type(self.skip_first_ngram_calls) is not bool:
+            raise ValueError(
+                "skip_first_ngram_calls must be a bool, got "
+                f"{self.skip_first_ngram_calls!r}"
+            )
+        if (
+            3 * self.vocab_size
+            * len(self.keys)
+            * 8
+            > _MAX_G_VALUES_BYTES
+        ):
+            raise ValueError(
+                "three vocab-by-depth SynthID matrices exceed the 192 MiB "
+                "g-value deployment budget"
             )
         object.__setattr__(self, "depth", len(self.keys))
 
@@ -290,7 +373,10 @@ def _accumulate_hash(
     return current_hash
 
 
-@functools.lru_cache(maxsize=32)
+# At the 16 MiB per-table ceiling, four CPU entries cap aggregate resident
+# table storage at 64 MiB; two per-device entries add at most 32 MiB per
+# device. This combined scope is intentional and bounded.
+@functools.lru_cache(maxsize=4)
 def _sampling_table(sampling_table_size: int, sampling_table_seed: int) -> torch.Tensor:
     """The precomputed Bernoulli(0.5) g-value lookup table (transformers
     `SynthIDTextWatermarkLogitsProcessor.__init__`, logits_process.py lines
@@ -328,7 +414,7 @@ def _keys_tensor_on(keys: "tuple[int, ...]", device_str: str) -> torch.Tensor:
     return _keys_tensor(keys).to(device=device_str)
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=2)
 def _sampling_table_on(
     sampling_table_size: int, sampling_table_seed: int, device_str: str
 ) -> torch.Tensor:

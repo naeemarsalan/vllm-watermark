@@ -126,10 +126,14 @@ The hardening transcript also established the following narrow results:
 - The fresh-pod package freeze matched all 78 entries in the committed
   constraints file (`EXECUTED`; [item 2](../EXPERIMENTS.md#2-pinned-install--pip-freeze-diff-zero-differences)).
 
-The committed action has a fail-closed detector-outage branch (`STATIC`;
-committed action), but no outage command and raw output are preserved.
-Live outage behavior therefore remains `OPEN` under fact D5. The executed
-malformed-response cases must not be broadened into an outage claim.
+The earlier upstream-NeMo action has a fail-closed detector-outage branch
+(`STATIC`; committed action); its hardening transcript preserves malformed-response
+execution, not a live outage. Separately, the current RHOAI-managed
+metadata-only broker path executed a real detector outage: it exhausted three
+attempts and the synchronous gateway returned a content-free 503 (`EXECUTED`;
+[fact D5](facts.md), [current managed-path evidence](../EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted)).
+That scoped result must not be broadened into platform-wide outage behavior, which
+remains `OPEN`.
 
 ## RHOAI-managed `NemoGuardrails`: executed scope and open boundaries
 

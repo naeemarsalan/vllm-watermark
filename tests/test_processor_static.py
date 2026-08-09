@@ -122,6 +122,65 @@ def _make_processor(vocab_size=50) -> KGWLogitsProcessor:
 
 
 # ---------------------------------------------------------------------------
+# KGWConfig validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("vocab_size", True),
+        ("vocab_size", 1.0),
+        ("vocab_size", 0),
+        ("vocab_size", (1 << 20) + 1),
+        ("hash_key", True),
+        ("hash_key", 1.0),
+        ("hash_key", -1),
+        ("hash_key", 1 << 64),
+        ("gamma", True),
+        ("gamma", "0.25"),
+        ("gamma", float("nan")),
+        ("gamma", float("inf")),
+        ("gamma", 0.0),
+        ("gamma", 1.0),
+        ("delta", True),
+        ("delta", "2.0"),
+        ("delta", float("nan")),
+        ("delta", float("inf")),
+        ("delta", -0.01),
+        ("delta", 100.01),
+        ("context_width", True),
+        ("context_width", 1.0),
+    ],
+)
+def test_kgw_config_rejects_invalid_types_and_bounds(field, bad_value):
+    values = {"vocab_size": 4, "hash_key": 1, "gamma": 0.25, "delta": 2.0}
+    values[field] = bad_value
+    with pytest.raises(ValueError):
+        KGWConfig(**values)
+
+
+def test_kgw_config_accepts_inclusive_maxima():
+    cfg = KGWConfig(
+        vocab_size=1 << 20,
+        hash_key=(1 << 64) - 1,
+        gamma=0.5,
+        delta=100.0,
+    )
+    assert cfg.greenlist_size == 1 << 19
+
+
+def test_kgw_config_rejects_greenlist_allocation_budget():
+    with pytest.raises(ValueError, match="4 MiB"):
+        KGWConfig(vocab_size=1 << 20, hash_key=1, gamma=0.999)
+
+
+def test_kgw_config_rejects_empty_effective_greenlist():
+    with pytest.raises(ValueError, match="effective greenlist_size"):
+        KGWConfig(vocab_size=3, hash_key=1, gamma=0.25)
+
+
+# ---------------------------------------------------------------------------
 # __init__ / graceful degradation
 # ---------------------------------------------------------------------------
 
@@ -159,6 +218,46 @@ def test_init_single_watermark_key_env_becomes_default(monkeypatch):
     assert set(processor._keys) == {"default"}
     assert processor._default_key is not None
     assert processor._default_key.key_id == "default"
+
+
+@pytest.mark.parametrize(
+    ("env_name", "bad_value", "vocab_size"),
+    [
+        ("VLLM_WATERMARK_GAMMA", "nan", 1000),
+        ("VLLM_WATERMARK_GAMMA", "inf", 1000),
+        ("VLLM_WATERMARK_GAMMA", "0", 1000),
+        ("VLLM_WATERMARK_GAMMA", "1", 1000),
+        ("VLLM_WATERMARK_GAMMA", "0.0001", 1000),
+        ("VLLM_WATERMARK_DELTA", "nan", 1000),
+        ("VLLM_WATERMARK_DELTA", "inf", 1000),
+        ("VLLM_WATERMARK_DELTA", "-1", 1000),
+        ("VLLM_WATERMARK_DELTA", "100.01", 1000),
+        ("VLLM_WATERMARK_CACHE_SIZE", "-1", 1000),
+        ("VLLM_WATERMARK_CACHE_SIZE", "1025", 1000),
+        (None, None, (1 << 20) + 1),
+    ],
+)
+def test_init_rejects_invalid_kgw_generation_bounds(
+    monkeypatch, env_name, bad_value, vocab_size
+):
+    if env_name is not None:
+        monkeypatch.setenv(env_name, bad_value)
+    with pytest.raises(ValueError):
+        _make_processor(vocab_size=vocab_size)
+
+
+def test_init_accepts_kgw_generation_maxima(monkeypatch):
+    monkeypatch.setenv("VLLM_WATERMARK_DELTA", "100")
+    monkeypatch.setenv("VLLM_WATERMARK_CACHE_SIZE", "32")
+    processor = _make_processor(vocab_size=1 << 20)
+    assert processor._delta == 100.0
+    assert processor._cache_size == 32
+
+
+def test_init_rejects_cross_parameter_kgw_cache_budget(monkeypatch):
+    monkeypatch.setenv("VLLM_WATERMARK_CACHE_SIZE", "128")
+    with pytest.raises(ValueError, match="64 MiB"):
+        _make_processor(vocab_size=1 << 20)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +536,21 @@ def test_apply_skips_out_of_range_row_index(monkeypatch):
     logits = torch.zeros(2, 20)
     out = processor.apply(logits)  # must not raise
     assert torch.equal(out, torch.zeros(2, 20))
+
+
+def test_apply_rejects_negative_row_index(monkeypatch):
+    monkeypatch.setenv("WATERMARK_KEY", _DUMMY_SECRET)
+    processor = _make_processor(vocab_size=20)
+    added = [
+        (0, _FakeSamplingParams(extra_args={"watermark": "on"}), None, [1]),
+        (-1, _FakeSamplingParams(extra_args={"watermark": "on"}), None, [1]),
+    ]
+    processor.update_state(BatchUpdate(batch_size=2, removed=[], added=added, moved=[]))
+    logits = torch.zeros(1, 20)
+
+    with pytest.raises(ValueError, match="row index must be >= 0"):
+        processor.apply(logits)
+    assert torch.equal(logits, torch.zeros(1, 20))
 
 
 def test_apply_wider_logits_than_vocab_size_is_fine(monkeypatch):
