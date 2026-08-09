@@ -32,6 +32,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import traceback
+import uuid
 
 import jwt
 import pytest
@@ -40,6 +43,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
 import app as detector_app
+from vllm_watermark.keys import load_keys
 from vllm_watermark.kgw.core import KGWConfig, greenlist_ids
 
 DUMMY_HEX_SECRET = "aa" * 16  # obviously-dummy test secret, AGENTS.md #3
@@ -215,6 +219,9 @@ class TestContentsEndpoint:
 # ---------------------------------------------------------------------------
 
 _REQUIRED_DETECT_FIELDS = (
+    "validation_id",
+    "response_id",
+    "content_sha256",
     "scheme",
     "key_id",
     "verdict",
@@ -241,6 +248,9 @@ class TestDetectEndpoint:
             assert field in body, f"missing field {field!r} in {body!r}"
 
         assert body["scheme"] == "kgw"
+        assert body["validation_id"] is None
+        assert body["response_id"] is None
+        assert body["content_sha256"] == hashlib.sha256(wm_text.encode("utf-8")).hexdigest()
         assert body["key_id"] == "test-key"
         assert body["verdict"] is True
         assert body["z_score"] >= 4.0
@@ -264,6 +274,85 @@ class TestDetectEndpoint:
         resp = client.post("/v1/watermark/detect", json={"text": CLEAN_TEXT, "scheme": "synthid"})
         assert resp.status_code == 200
         assert resp.json()["scheme"] == "synthid"
+
+    def test_validation_id_body_is_strict_and_echoed(self, client):
+        validation_id = str(uuid.uuid4())
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"text": CLEAN_TEXT, "validation_id": validation_id},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["validation_id"] == validation_id
+        assert body["content_sha256"] == hashlib.sha256(CLEAN_TEXT.encode("utf-8")).hexdigest()
+
+    def test_validation_id_header_is_strict_and_echoed(self, client):
+        validation_id = str(uuid.uuid4())
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"text": CLEAN_TEXT},
+            headers={"X-Watermark-Validation-Id": validation_id},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["validation_id"] == validation_id
+
+    def test_response_id_is_strict_and_echoed(self, client):
+        response_id = "chatcmpl-local-123"
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"text": CLEAN_TEXT, "response_id": response_id},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["response_id"] == response_id
+
+    @pytest.mark.parametrize(
+        "bad_validation_id",
+        ["not-a-uuid", "00000000-0000-0000-0000-00000000000A", "00000000000000000000000000000000"],
+    )
+    def test_malformed_validation_id_body_422(self, client, bad_validation_id):
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"text": CLEAN_TEXT, "validation_id": bad_validation_id},
+        )
+        assert resp.status_code == 422
+
+    def test_malformed_validation_id_header_422(self, client):
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"text": CLEAN_TEXT},
+            headers={"X-Watermark-Validation-Id": "not-a-uuid"},
+        )
+        assert resp.status_code == 422
+
+    def test_mismatched_validation_id_body_and_header_422(self, client):
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"text": CLEAN_TEXT, "validation_id": str(uuid.uuid4())},
+            headers={"X-Watermark-Validation-Id": str(uuid.uuid4())},
+        )
+        assert resp.status_code == 422
+
+    def test_validation_id_rejected_for_batch(self, client):
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"texts": [CLEAN_TEXT], "validation_id": str(uuid.uuid4())},
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.parametrize("response_id", ["", "bad response id", "x" * 257])
+    def test_malformed_response_id_422(self, client, response_id):
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"text": CLEAN_TEXT, "response_id": response_id},
+        )
+        assert resp.status_code == 422
+
+    def test_response_id_rejected_for_batch(self, client):
+        resp = client.post(
+            "/v1/watermark/detect",
+            json={"texts": [CLEAN_TEXT], "response_id": "cmpl-batch"},
+        )
+        assert resp.status_code == 422
 
     def test_batch_texts_results_list(self, client):
         wm_text = _make_kgw_watermarked_text(client.app.state)
@@ -460,6 +549,19 @@ class TestHealthReady:
         assert health_resp.status_code == 200
         assert ready_resp.status_code == 503
         assert ready_resp.json()["detail"]["keys_configured"] is False
+        assert ready_resp.json()["detail"]["default_key_configured"] is False
+
+    def test_ready_503_when_plural_keys_have_no_default_key(self, base_env):
+        base_env.setenv("WATERMARK_KEYS", f"first:{DUMMY_HEX_SECRET},second:{'bb' * 16}")
+        base_env.delenv("WATERMARK_KEY", raising=False)
+        base_env.delenv("WATERMARK_KEY_ID", raising=False)
+        application = detector_app.create_app()
+        with TestClient(application) as c:
+            resp = c.get("/ready")
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert detail["keys_configured"] is True
+        assert detail["default_key_configured"] is False
 
     def test_vocab_size_fallback_warns_but_does_not_crash(self, base_env, caplog):
         base_env.delenv("WATERMARK_VOCAB_SIZE", raising=False)
@@ -470,3 +572,204 @@ class TestHealthReady:
         assert resp.status_code == 200
         assert application.state.vocab_size == GPT2_VOCAB_SIZE  # len(gpt2 tokenizer)
         assert any("WATERMARK_VOCAB_SIZE not set" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("tokenizer_size", [detector_app._MAX_WATERMARK_VOCAB_SIZE])
+    def test_vocab_size_fallback_maximum_is_accepted(self, base_env, monkeypatch, tokenizer_size):
+        class StubTokenizer:
+            def __len__(self):
+                return tokenizer_size
+
+        base_env.delenv("WATERMARK_VOCAB_SIZE", raising=False)
+        monkeypatch.setattr(detector_app.AutoTokenizer, "from_pretrained", lambda _: StubTokenizer())
+        with TestClient(detector_app.create_app()) as client:
+            assert client.get("/ready").status_code == 200
+        assert client.app.state.vocab_size == tokenizer_size
+
+    @pytest.mark.parametrize(
+        "tokenizer_size",
+        [0, detector_app._MAX_WATERMARK_VOCAB_SIZE + 1],
+    )
+    def test_vocab_size_fallback_out_of_bounds_fails_startup(self, base_env, monkeypatch, tokenizer_size):
+        class StubTokenizer:
+            def __len__(self):
+                return tokenizer_size
+
+        base_env.delenv("WATERMARK_VOCAB_SIZE", raising=False)
+        monkeypatch.setattr(detector_app.AutoTokenizer, "from_pretrained", lambda _: StubTokenizer())
+        with pytest.raises(RuntimeError, match="tokenizer vocabulary size"):
+            with TestClient(detector_app.create_app()):
+                pass
+
+    def test_vocab_size_fallback_rejects_empty_kgw_greenlist(self, base_env, monkeypatch):
+        class StubTokenizer:
+            def __len__(self):
+                return 1
+
+        base_env.delenv("WATERMARK_VOCAB_SIZE", raising=False)
+        base_env.setenv("VLLM_WATERMARK_GAMMA", "0.1")
+        monkeypatch.setattr(detector_app.AutoTokenizer, "from_pretrained", lambda _: StubTokenizer())
+        with pytest.raises(RuntimeError, match="greenlist_size"):
+            with TestClient(detector_app.create_app()):
+                pass
+
+
+_NUMERIC_MAX_CASES = (
+    ("WATERMARK_VOCAB_SIZE", detector_app._MAX_WATERMARK_VOCAB_SIZE, detector_app._MAX_WATERMARK_VOCAB_SIZE + 1),
+    ("WATERMARK_Z_THRESHOLD", detector_app._MAX_WATERMARK_Z_THRESHOLD, detector_app._MAX_WATERMARK_Z_THRESHOLD + 1.0),
+    ("VLLM_WATERMARK_GAMMA", math.nextafter(1.0, 0.0), 1.0),
+    ("VLLM_WATERMARK_DELTA", detector_app._MAX_KGW_DELTA, detector_app._MAX_KGW_DELTA + 1.0),
+    ("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", detector_app._MAX_SYNTHID_NGRAM_LEN, detector_app._MAX_SYNTHID_NGRAM_LEN + 1),
+    ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE", detector_app._MAX_SYNTHID_SAMPLING_TABLE_SIZE, detector_app._MAX_SYNTHID_SAMPLING_TABLE_SIZE + 1),
+    ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED", detector_app._MAX_TORCH_SEED, detector_app._MAX_TORCH_SEED + 1),
+    ("VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE", detector_app._MAX_SYNTHID_CONTEXT_HISTORY_SIZE, detector_app._MAX_SYNTHID_CONTEXT_HISTORY_SIZE + 1),
+    ("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", detector_app._MAX_SYNTHID_KEY_DEPTH, detector_app._MAX_SYNTHID_KEY_DEPTH + 1),
+)
+
+_NUMERIC_INVALID_CASES = (
+    ("WATERMARK_VOCAB_SIZE", ""),
+    ("WATERMARK_VOCAB_SIZE", "   "),
+    ("WATERMARK_VOCAB_SIZE", "0"),
+    ("WATERMARK_Z_THRESHOLD", "nan"),
+    ("WATERMARK_Z_THRESHOLD", "-0.1"),
+    ("VLLM_WATERMARK_GAMMA", "0"),
+    ("VLLM_WATERMARK_GAMMA", "inf"),
+    ("VLLM_WATERMARK_GAMMA", "1"),
+    ("VLLM_WATERMARK_DELTA", "-1"),
+    ("VLLM_WATERMARK_DELTA", "inf"),
+    ("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", "0"),
+    ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE", "0"),
+    ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED", str(-(1 << 63) - 1)),
+    ("VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE", "-1"),
+    ("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", "0"),
+)
+
+
+class TestStartupConfigurationValidation:
+    @pytest.mark.parametrize(("name", "value"), _NUMERIC_INVALID_CASES)
+    def test_every_numeric_setting_rejects_invalid_values_at_startup(self, name, value):
+        with pytest.raises(RuntimeError, match=name):
+            detector_app.load_settings({name: value})
+
+    @pytest.mark.parametrize(("name", "value"), _NUMERIC_INVALID_CASES)
+    def test_every_invalid_numeric_setting_fails_lifespan_before_readiness(
+        self, base_env, monkeypatch, name, value
+    ):
+        monkeypatch.setattr(detector_app.AutoTokenizer, "from_pretrained", lambda _: object())
+        base_env.setenv(name, value)
+        with pytest.raises(RuntimeError, match=name):
+            with TestClient(detector_app.create_app()):
+                pass
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("WATERMARK_VOCAB_SIZE", True),
+            ("WATERMARK_Z_THRESHOLD", False),
+            ("VLLM_WATERMARK_GAMMA", True),
+            ("VLLM_WATERMARK_DELTA", False),
+            ("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", False),
+            ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE", True),
+            ("VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED", False),
+            ("VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE", True),
+            ("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", False),
+        ],
+    )
+    def test_numeric_settings_require_string_values(self, name, value):
+        with pytest.raises(RuntimeError, match=name):
+            detector_app.load_settings({name: value})
+
+    @pytest.mark.parametrize(
+        ("vocab_size", "gamma"),
+        [(1, "0.1"), (2, "0.49")],
+    )
+    def test_explicit_vocab_and_gamma_reject_empty_kgw_greenlist(self, vocab_size, gamma):
+        with pytest.raises(RuntimeError, match="greenlist_size"):
+            detector_app.load_settings(
+                {"WATERMARK_VOCAB_SIZE": str(vocab_size), "VLLM_WATERMARK_GAMMA": gamma}
+            )
+
+    def test_explicit_vocab_and_gamma_accept_one_token_greenlist(self):
+        settings = detector_app.load_settings(
+            {"WATERMARK_VOCAB_SIZE": "4", "VLLM_WATERMARK_GAMMA": "0.25"}
+        )
+        assert settings.vocab_size_env == 4
+
+    @pytest.mark.parametrize(("name", "accepted", "overflow"), _NUMERIC_MAX_CASES)
+    def test_numeric_setting_maximum_is_accepted_by_load_settings(self, name, accepted, overflow):
+        settings = detector_app.load_settings({name: str(accepted)})
+        assert settings is not None
+
+    @pytest.mark.parametrize(("name", "accepted", "overflow"), _NUMERIC_MAX_CASES)
+    def test_numeric_setting_overflow_rejected_by_load_settings(self, name, accepted, overflow):
+        with pytest.raises(RuntimeError, match=name):
+            detector_app.load_settings({name: str(overflow)})
+
+    @pytest.mark.parametrize(("name", "accepted", "overflow"), _NUMERIC_MAX_CASES)
+    def test_numeric_setting_maximum_reaches_ready_lifespan(
+        self, base_env, monkeypatch, name, accepted, overflow
+    ):
+        # A stub keeps this startup-boundary test independent of the local HF
+        # cache; no request is made, so tokenizer behavior is out of scope.
+        monkeypatch.setattr(detector_app.AutoTokenizer, "from_pretrained", lambda _: object())
+        base_env.setenv(name, str(accepted))
+        with TestClient(detector_app.create_app()) as client:
+            assert client.get("/health").status_code == 200
+            assert client.get("/ready").status_code == 200
+
+    @pytest.mark.parametrize(("name", "accepted", "overflow"), _NUMERIC_MAX_CASES)
+    def test_numeric_setting_overflow_fails_lifespan_before_readiness(
+        self, base_env, monkeypatch, name, accepted, overflow
+    ):
+        monkeypatch.setattr(detector_app.AutoTokenizer, "from_pretrained", lambda _: object())
+        base_env.setenv(name, str(overflow))
+        with pytest.raises(RuntimeError, match=name):
+            with TestClient(detector_app.create_app()):
+                pass
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "raw-secret-without-colon",
+            ":raw-secret-with-empty-key-id",
+            "key-id:raw-secret-not-hex",
+        ],
+    )
+    def test_malformed_plural_key_errors_do_not_expose_secret_material(self, value):
+        with pytest.raises(ValueError) as exc_info:
+            load_keys({"WATERMARK_KEYS": value})
+        assert "raw-secret" not in str(exc_info.value)
+        assert value not in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("env_name", "value"),
+        [
+            ("WATERMARK_KEY", "singular-secret-marker-not-hex"),
+            ("WATERMARK_KEYS", "plural-secret-marker-not-hex"),
+            ("WATERMARK_KEYS", "key-id:plural-secret-marker-not-hex"),
+        ],
+    )
+    def test_singular_and_plural_key_errors_redact_str_repr_and_traceback(self, env_name, value):
+        env = {env_name: value}
+        if env_name == "WATERMARK_KEY":
+            env["WATERMARK_KEY_ID"] = "test-key"
+        with pytest.raises((RuntimeError, ValueError)) as exc_info:
+            load_keys(env)
+
+        # Exercise all common exception-rendering paths, including the cause /
+        # context chain that an ASGI startup logger could format.
+        rendered = "".join(traceback.format_exception(exc_info.value))
+        rendered_context = repr(exc_info.value.__context__)
+        assert value not in str(exc_info.value)
+        assert value not in repr(exc_info.value)
+        assert value not in rendered
+        assert value not in rendered_context
+
+    def test_watermark_key_repr_and_str_redact_secret_material(self):
+        key = load_keys({"WATERMARK_KEY": DUMMY_HEX_SECRET, "WATERMARK_KEY_ID": "test-key"})[
+            "test-key"
+        ]
+        for rendered in (repr(key), str(key)):
+            assert DUMMY_HEX_SECRET not in rendered
+            assert key.secret_digest.hex() not in rendered
+            assert str(key.hash_key) not in rendered
+            assert "<redacted>" in rendered

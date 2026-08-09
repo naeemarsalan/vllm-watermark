@@ -80,6 +80,14 @@ metadata:
       [{"from":{"kind":"ImageStreamTag","name":"detector:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"detector-synthid\")].image","paused":false}]
 spec:
   replicas: 1
+  # STATIC capacity policy (source: this manifest): match the KGW detector's
+  # no-surge rollout. The configured managed-path failure policy applies during
+  # the resulting short single-replica replacement window.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/component: detector-synthid
@@ -205,8 +213,10 @@ spec:
           # tokenizer has loaded (`AutoTokenizer.from_pretrained`, needs
           # network egress to huggingface.co on every pod start, since
           # `hf-cache` is an emptyDir and does not persist across restarts)
-          # AND at least one watermark key is configured; 200 with
-          # `key_ids` once both are true. MEASURED (2026-08-08, recorded
+          # AND the configured default watermark key resolves (a non-empty
+          # key list alone is insufficient); 200 with `key_ids` once both
+          # are true (`STATIC`; detector/app.py current route). MEASURED
+          # (2026-08-08, recorded
           # deploys): Deployments reached Available within one 15-second
           # poll interval after `oc apply` in repeated rollouts (image
           # already in the internal registry; tokenizer-only download) —
