@@ -467,6 +467,7 @@ def reconcile_run(
                 "scheme": record["scheme"],
                 "key_id": record["key_id"],
                 "verdict": record["verdict"],
+                "mode": record["mode"],
                 "attempts": record["attempts"],
                 "timing": record["timing"],
                 "detector_call_id": record["detector_call_id"],

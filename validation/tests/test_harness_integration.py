@@ -557,10 +557,12 @@ def test_continuous_validation_harness_over_real_http(running_gateway: tuple[str
     assert len(report["n1"]["record_evidence"]) == 20
     assert all(record["ids_correlated"] is True for record in report["n1"]["record_evidence"])
     assert {record["delivery_outcome"] for record in report["n1"]["record_evidence"]} == {"delivered"}
+    assert {record["mode"] for record in report["n1"]["record_evidence"]} == {"synchronous"}
     assert report["n5"]["responses"] == 100
     assert report["n5"]["selected"] == 20
     assert report["n5"]["counters"]["unsampled"] == 80
     assert len(report["n5"]["record_evidence"]) == 20
+    assert {record["mode"] for record in report["n5"]["record_evidence"]} == {"synchronous"}
     assert report["latency_semantics"]["validation_lag"] == "validation_queue_wait_to_attempt_start"
     assert report["policy_semantics"] == {
         "mode": "synchronous",
