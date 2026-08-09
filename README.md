@@ -2,8 +2,6 @@
 
 **Decode-time text watermarking and continuous validation for vLLM on OpenShift AI.**
 
-[![GitHub Pages](https://github.com/naeemarsalan/vllm-watermark/actions/workflows/pages.yml/badge.svg)](https://github.com/naeemarsalan/vllm-watermark/actions/workflows/pages.yml)
-
 ## [Open the animated architecture and full article](https://naeemarsalan.github.io/vllm-watermark/)
 
 This repository is an evidence-tracked proof of concept for generating and
