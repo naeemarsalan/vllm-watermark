@@ -1,9 +1,10 @@
 # vLLM v0.18.0 custom-LogitsProcessor API notes
 
-**STATIC.** Everything in this page was verified by fetching the actual
-v0.18.0-tagged vLLM source and the live vLLM docs page, not from memory or
-from `docs/facts.md`'s prior (also STATIC, `main`-branch-sourced) entries.
-Fetched 2026-08-08.
+**Mixed `STATIC` / `OFFICIAL-SRC` / `EXECUTED`.** API descriptions come
+from the v0.18.0-tagged source and official vLLM documentation fetched
+2026-08-08. Plugin loading, HTTP-400 request validation, and speculative-
+decoding rejection were also executed; those claims link to preserved
+commands and raw output in [`EXPERIMENTS.md`](../EXPERIMENTS.md).
 
 ```
 git clone --depth 1 --branch v0.18.0 https://github.com/vllm-project/vllm.git
@@ -16,16 +17,15 @@ All `vllm/...` file paths and line numbers below are relative to that
 commit. All cited vLLM files carry `# SPDX-License-Identifier: Apache-2.0`
 / `# SPDX-FileCopyrightText: Copyright contributors to the vLLM project`.
 
-This page supports `src/vllm_watermark/kgw/processor.py` (Task B). It does
-**not** cover the KGW algorithm itself (Task A: `kgw/core.py`, `kgw/detector.py`,
-`keys.py`) or the detection-service contract (Phase 3).
+This page documents the vLLM-facing processor interface. It does not cover
+the KGW detector algorithm or the detection-service contract.
 
 ---
 
 ## 1. `LogitsProcessor` ABC
 
 Source: `vllm/v1/sample/logits_processor/interface.py` (106 lines), re-exported
-publicly from `vllm.v1.sample.logits_processor` (see §3 `__all__`).
+publicly from `vllm.v1.sample.logits_processor`.
 
 ```python
 class MoveDirectionality(Enum):
@@ -110,19 +110,12 @@ then moved** — the opposite order for added/removed:
   `WrappedPerReqLogitsProcessor` example code (§5): identical
   added→removed→moved order.
 
-We could not find any builtin or documented-example processor that
-actually implements removed-before-added. `KGWLogitsProcessor.update_state()`
-follows the code (added, removed, moved), not the prose, because that is
-what every shipped/tested reference implementation and the docs' own
-worked example do. This is very likely safe either way for genuinely
-disjoint indices, and the reason added-before-removed doesn't break replace
--in-place ("Added or moved requests may replace existing requests with the
-same index" per the `BatchUpdate` docstring's own NOTE) is that an index
-reused within one step appears in `added` but is *not* separately listed in
-`removed` for that step — i.e. `removed` and `added` are not expected to
-target the same index within a single `BatchUpdate`. We did not find an
-explicit statement of that invariant in the source; it is inferred from the
-NOTE plus the fact that every reference implementation relies on it.
+No builtin or documented example inspected used removed-before-added.
+`KGWLogitsProcessor.update_state()` follows the shipped code order: added,
+removed, moved (`STATIC`; pinned-source comparison). The source does not
+explicitly state whether `removed` and `added` can target the same index in
+one update, so safety under that case remains `OPEN`; no missing invariant is
+presented as fact.
 
 ## 3. Loading a plugin: entry-point group name and FQCN format
 
@@ -156,8 +149,9 @@ class name, not a dot.** This repo's plugin FQCN is:
 vllm_watermark.kgw.processor:KGWLogitsProcessor
 ```
 
-CLI flag: the actual `argparse` registration is (verified in a separate
-v0.18.0 checkout of `vllm/engine/arg_utils.py`, line 749):
+CLI flag: the actual `argparse` registration in the pinned v0.18.0
+`vllm/engine/arg_utils.py`, line 749, is (`STATIC`; pinned source revision
+registered at the top of this note):
 
 ```python
 model_group.add_argument("--logits-processors", **model_kwargs["logits_processors"])
@@ -165,22 +159,20 @@ model_group.add_argument("--logits-processors", **model_kwargs["logits_processor
 
 i.e. **`--logits-processors`** (hyphenated). The live docs page (§5) shows
 `--logits_processors` (underscored) in its `vllm serve` examples in two
-places — this looks like a docs prose/typo inconsistency with the actual
-registered flag name; we did not find an underscore-flag alias registered
-anywhere in `arg_utils.py`. Use the hyphenated form.
+places — a documentation inconsistency with the actual registered flag name.
+No underscore-flag alias appears in the pinned `arg_utils.py` source
+(`STATIC`). Use the hyphenated form.
 
-`build_logitsprocs()` (same file, ~line 184-217) is what actually
-constructs one instance per configured logits-processor class at engine
-init: `BUILTIN_LOGITS_PROCESSORS` (`MinTokensLogitsProcessor`,
+`build_logitsprocs()` (same file, ~line 184-217) constructs one instance
+per entry in the returned processor-class list at engine init:
+`BUILTIN_LOGITS_PROCESSORS` (`MinTokensLogitsProcessor`,
 `LogitBiasLogitsProcessor`, `MinPLogitsProcessor`) plus
 `custom_logitsprocs_classes` (from `_load_custom_logitsprocs`, entry
 points + FQCNs), each called as `ctor(vllm_config, device, is_pin_memory)`
-— exactly one instance per class per engine, which is why
-`KGWLogitsProcessor.validate_params()` (a `@classmethod`, no `self`) not
-being able to see a *specific instance's* cached key config is a
-non-issue in practice: there is only ever one instance to have cached
-anything, and it's simplest for `validate_params()` to just re-derive the
-same (process-global, env-sourced) answer independently. See §4.
+(`STATIC`). The same class can occur more than once when entry-point and
+FQCN loading are combined; §10 records the executed double-load.
+Environment access is process-global, so `validate_params()` can read the
+configured key material without relying on a processor instance.
 
 ## 4. Speculative-decoding incompatibility (matches `docs/facts.md` B7)
 
@@ -203,7 +195,9 @@ if vllm_config.speculative_config:
 
 i.e. this is an engine-*startup*-time `ValueError` (config validation, not
 per-request), raised only if speculative decoding is configured **and**
-any custom logits processor (entry-point or FQCN) is present.
+any custom logits processor (entry-point or FQCN) is present (`STATIC`).
+The exact rejection was also observed on vLLM 0.18.0 (`EXECUTED`; [raw
+record](../EXPERIMENTS.md#spec-decode-incompatibility-executed--b7-upgraded)).
 
 ## 5. Docs page cross-check
 
@@ -219,24 +213,21 @@ Confirms, in the docs' own prose:
 > entrypoint, `validate_params()` will validate `SamplingParams` and refuse
 > request with invalid arguments.**"
 
-This is the docs-level confirmation of the mechanism traced at the source
+This is the docs-level confirmation (`OFFICIAL-SRC`; fetched vLLM page above)
+of the mechanism traced at the source
 level in §6 below. The page's example `DummyLogitsProcessor` /
 `WrappedPerReqLogitsProcessor` snippets, `vllm_xargs` REST/SDK examples,
 and FQCN/entry-point loading instructions are otherwise consistent with
-what we independently verified from source (§1-§4), except for the two
+the pinned source (§1-§4), except for the two
 discrepancies flagged above (§2 processing order, §3 CLI flag spelling).
 
 ## 6. Per-request error surfacing: how a `validate_params()` `ValueError`
 becomes an HTTP 400
 
-This is the specific question the Task B brief raised: *"validate_params
-can't see env? it's a classmethod — if so, do the rejection in
-update_state->raise? Check what the builtin processors do for
-request-time errors and pick the mechanism that actually surfaces a 4xx to
-the API caller."*
-
-**Finding: `validate_params()` raising a plain `ValueError` is exactly the
-mechanism vLLM uses, and it does surface as an HTTP 400.** No builtin
+**Finding:** source tracing shows that `validate_params()` raising a plain
+`ValueError` maps to HTTP 400 (`STATIC`), and the repository's malformed
+watermark arguments were rejected with HTTP 400 (`EXECUTED`; [Phase 1
+record](../EXPERIMENTS.md#per-request-control--validation-executed)). No builtin
 processor defers this kind of rejection to `update_state()` — searching
 `builtin.py`, none of `MinPLogitsProcessor`, `LogitBiasLogitsProcessor`,
 `MinTokensLogitsProcessor` override `validate_params()` at all (they rely
@@ -245,11 +236,11 @@ on the no-op base-class default, since their arguments — `min_p`,
 validated elsewhere); the docs page's own worked examples (§5) both
 implement `validate_params()` to raise `ValueError` for a bad
 `extra_args["target_token"]`, which is the pattern `KGWLogitsProcessor`
-follows. The classmethod-vs-env question resolves simply: `os.environ`
-(and, in our case, `vllm_watermark.keys.load_key`/`load_keys`, which reads
+follows. `os.environ`
+(and, in this repository, `vllm_watermark.keys.load_key`/`load_keys`, which reads
 `os.environ`) is process-global state, readable from anywhere including a
 `@classmethod` — the classmethod just can't reach a *specific instance's*
-cached state, which is not needed here (§3, one instance per engine).
+cached state, which is not needed for this validation.
 
 Full call chain, traced from the source (`vllm/sampling_params.py`,
 `vllm/v1/engine/input_processor.py`, `vllm/entrypoints/...`), all in this
@@ -278,7 +269,7 @@ v0.18.0 checkout:
        for logits_procs in cached_load_custom_logitsprocs(logits_processors):
            logits_procs.validate_params(sampling_params)
    ```
-   This is the call site of our `KGWLogitsProcessor.validate_params(cls,
+   This is the call site of the repository's `KGWLogitsProcessor.validate_params(cls,
    sampling_params)`.
 4. **`SamplingParams.verify()` is called per-request** from
    `InputProcessor._validate_params()` —
@@ -320,11 +311,11 @@ independently calls `vllm_watermark.keys.load_key()` (re-reading env; see
 processor.py docstring for why this is cheap and correct despite being a
 classmethod) and raises plain `ValueError` when a request explicitly asks
 `watermark=on` (or gives an unresolvable `watermark_key_id`) but no
-matching key is configured. That `ValueError` is guaranteed by the chain
-above to reach the API caller as an HTTP 400 with a `BadRequestError` body,
-*before* generation starts — not a silent fall-through to unwatermarked
-output, and not a failure buried inside `update_state()`/`apply()` where it
-would abort the whole batch rather than just the one bad request.
+matching key is configured. The traced chain predicts a `BadRequestError`
+before generation (`STATIC`), and the malformed, unknown-field, and unknown-
+key cases in the Phase 1 matrix behaved that way (`EXECUTED`). Other
+untested exception paths are not claimed ([Phase 1 validation
+record](../EXPERIMENTS.md#per-request-control--validation-executed)).
 
 ## 7. `vllm_xargs` → `SamplingParams.extra_args`
 
@@ -377,10 +368,9 @@ derived length. It is also what vLLM's own `SamplingParams` validation uses
 for `logprobs`/`logit_bias` vocab bounds checks (`_validate_logprobs`,
 `_validate_logit_bias`, same file `vllm/sampling_params.py` — both call
 `model_config.get_vocab_size()`), so it is the same notion of "vocab size"
-vLLM itself uses to size the logits tensor's last dimension — consistent
-with the `vllm_watermark.kgw.core` requirement (Task A) that generation and
-detection use the identical `vocab_size` value or scores silently
-degrade to near-zero.
+vLLM uses for logits bounds (`STATIC`). The detector must be configured
+consistently with generation; the runtime effect of a mismatch is not
+quantified here (`OPEN`).
 
 ## 9. Sources fetched (exact URLs)
 
@@ -404,7 +394,7 @@ degrade to near-zero.
   `https://api.github.com/repos/vllm-project/vllm/git/refs/tags/v0.18.0`
   (tag → commit SHA), both via `gh api`.
 
-## 8. Plugin loading has NO deduplication — entry points + FQCN flag double-load (EXECUTED)
+## 10. Plugin loading has no deduplication — entry points + FQCN flag double-load
 
 `_load_custom_logitsprocs()` (vllm/v1/sample/logits_processor/__init__.py, ~line 160)
 returns `_load_logitsprocs_plugins() + _load_logitsprocs_by_fqcns(logits_processors)`:
@@ -415,9 +405,12 @@ returns `_load_logitsprocs_plugins() + _load_logitsprocs_by_fqcns(logits_process
 - `_load_logitsprocs_by_fqcns()` appends every `--logits-processors` FQCN.
 - The two lists are concatenated with **no dedup** — a class present both as an entry
   point and as a flag value is instantiated **twice**, and both instances run in
-  `apply()` — for a bias-style watermark this silently doubles the effective delta.
+  `apply()` — for a bias-style watermark this doubles the effective delta
+  (`STATIC`; pinned v0.18.0 source).
 
-EXECUTED in the serving pod (2026-08-08, vLLM v0.18.0):
+The class-list result was independently re-executed in a fresh CPU-only pod
+using the v0.18.0 image digest and installed wheel (`EXECUTED`; [command and
+raw output](../EXPERIMENTS.md#raw-evidence-vllm-plugin-double-load-independent-re-execution)):
 
 ```
 >>> _load_custom_logitsprocs(["vllm_watermark.kgw.processor:KGWLogitsProcessor"])
@@ -426,6 +419,9 @@ EXECUTED in the serving pod (2026-08-08, vLLM v0.18.0):
 ['KGWLogitsProcessor', 'SynthIDLogitsProcessor']                          # correct
 ```
 
-**Rule for this repo: install the wheel and pass NO `--logits-processors` flag.**
-The Phase 1 measurements taken with flag+entry-point (effective delta 4.0) were
-re-taken single-instance — see EXPERIMENTS.md 2026-08-08 correction entry.
+**Rule for this repository: install the wheel and pass no
+`--logits-processors` flag.** The Phase 1 watermark-on signal, overhead, and
+temperature-0 interpretation from the flag-plus-entry-point window (effective
+delta approximately 4) are superseded; the corrected single-instance run is
+the evidence of record ([correction](../EXPERIMENTS.md#2026-08-08--correction-phase-1-ran-two-kgw-processor-instances-effective-delta-40),
+[rerun](../EXPERIMENTS.md#2026-08-08--phase-1-corrected--phase-2-synthid-through-vllm-serve-closes-d8)).

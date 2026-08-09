@@ -1,0 +1,40 @@
+# EXECUTED (scoped Phase 4 build, 2026-08-08): the curated binary build workflow
+# produced the recorded watermark-vllm image digest. This manifest remains a
+# rerunnable build recipe and requires fresh output on rerun (source:
+# EXPERIMENTS.md recovered Phase 4 transcript; rerun status `OPEN`).
+# STATIC safety rule (source: AGENTS.md section 3 and deploy/phase4/README.md):
+# binary Docker build for the Phase 4 runtime. The curated build context must
+# contain only Containerfile and dist/vllm_watermark-*.whl; never submit the
+# repository root because it also contains gitignored credential paths.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: watermark-vllm
+  namespace: watermark
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: watermark-vllm
+  namespace: watermark
+spec:
+  runPolicy: Serial
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Containerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: watermark-vllm:0.1.0
+  resources:
+    requests:
+      # The live CPU workers have less than one whole requested core free.
+      # Keep this reservation schedulable; the 4-GiB limit still bounds it.
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      memory: 4Gi

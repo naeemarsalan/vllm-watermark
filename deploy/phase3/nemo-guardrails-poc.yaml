@@ -30,10 +30,11 @@
 # running `pip install nemoguardrails` -- no RHOAI, no operator, and no
 # `NemoGuardrails` CRD was installed on this cluster; no RHOAI-managed
 # (Phase 4) work is included. This file therefore does not close, and
-# should not be cited as closing, docs/api-notes-nemo-guardrails.md sec
-# 5.2's open item (whether RHOAI 3.4's `NemoGuardrails` operator itself
-# mounts and auto-registers an admin-authored `actions.py` end-to-end) or
-# the RHOAI-managed-CR portion of docs/facts.md D5 -- those remain open.
+# should not be cited as closing the then-open RHOAI 3.4
+# `NemoGuardrails` operator/admin-action question or the managed-CR portion
+# of docs/facts.md D5. A later, separate managed execution closed that
+# scoped internal path (`EXECUTED`; EXPERIMENTS.md 2026-08-09 current-path
+# record); this historical plain-Pod run still provides no such evidence.
 # What this file DOES show, as a plain-Kubernetes analog: a ConfigMap
 # containing `config.yml`/`actions.py`/`flows.co` mounted at
 # `/app/config/$Name` (the same path convention the CR schema documents)

@@ -315,7 +315,8 @@ def score_token_ids_weighted_mean(
 
     Raises:
         ValueError: as score_token_ids_mean, or `weights` has the wrong
-            length.
+            length, contains a non-finite or negative value, or has an
+            all-zero sum.
     """
     g = _collect_g_values(token_ids, cfg)
     num_scored = g.shape[0]
@@ -333,13 +334,26 @@ def score_token_ids_weighted_mean(
         w = torch.as_tensor(weights, dtype=torch.float64)
         if tuple(w.shape) != (depth,):
             raise ValueError(f"weights must have shape ({depth},), got {tuple(w.shape)}")
+        if not bool(torch.isfinite(w).all()):
+            raise ValueError("weights must contain only finite values")
+        if bool((w < 0).any()):
+            raise ValueError("weights must be non-negative")
+        if w.max().item() == 0.0:
+            raise ValueError("weights must not be all zero")
     # Normalize so weights sum to `depth`, matching weighted_mean_score's
-    # `weights *= watermarking_depth / sum(weights)`.
+    # `weights *= watermarking_depth / sum(weights)`. Scale by the maximum
+    # first so a collection of individually-finite large weights cannot
+    # overflow its sum (the common scale cancels during normalization).
+    w = w / w.max()
     w = w * (depth / w.sum())
 
     g_f = g.to(torch.float64)
     mean_g = g_f.mean().item()
     weighted_score = (g_f * w[None, :]).sum().item() / (depth * num_scored)
+    # This is mathematically a convex combination of binary g-values, but
+    # float64 reduction can land one ulp outside [0, 1]. Keep the public
+    # score invariant exact, and derive significance from that same value.
+    weighted_score = max(0.0, min(1.0, weighted_score))
 
     se = math.sqrt(_NULL_G_VAR * (w**2).sum().item()) / (depth * math.sqrt(num_scored))
     z = (weighted_score - _NULL_G_MEAN) / se

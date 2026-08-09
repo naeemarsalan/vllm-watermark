@@ -2,13 +2,12 @@
 
 ## OpenShift on AWS with optional GPU capacity
 
-This workspace provisions an OpenShift 4.20 cluster named `ocp-ai` in `us-east-1`
-under the sandbox base domain (recorded in the local, gitignored `aws` file). Generated installer assets and credentials are
-excluded from Git (`aws`, `cluster/` — see `.gitignore`; never commit them).
-
-The initial cluster uses three `m6i.xlarge` control-plane nodes and three
-`m6i.xlarge` workers. A separate `g5.xlarge` GPU MachineSet is created at zero
-replicas because the AWS account has a four-vCPU on-demand G-instance quota.
+The repository's provisioning assets target an OpenShift 4.20 cluster named
+`ocp-ai`; Phase 0 recorded that cluster and its optional A10G GPU node
+(`EXECUTED`; [infrastructure run](../EXPERIMENTS.md#2026-08-08--phase-0-infrastructure-bring-up-ocp-ai-cluster)).
+Generated installer assets and credentials are excluded from Git as `aws` and
+`cluster/` (`STATIC`; [repository rules](../AGENTS.md#3-secrets-and-safety)).
+Do not inspect, print, or commit either location.
 
 ## GPU node
 
@@ -24,14 +23,16 @@ Remove the billable GPU node when it is no longer needed:
 ./scripts/scale-gpu.sh 0
 ```
 
-OpenShift AI also requires Node Feature Discovery and the NVIDIA GPU Operator
-before workloads can consume `nvidia.com/gpu` resources. They are installed by
-`scripts/install-gpu-operators.sh`, together with the required
-`NodeFeatureDiscovery` and catalog-provided `ClusterPolicy` resources.
+The repository provisions Node Feature Discovery and the NVIDIA GPU Operator
+through `scripts/install-gpu-operators.sh` (`STATIC`; [provisioning script](../scripts/install-gpu-operators.sh)).
+The recorded Phase 0 run observed both operators and a completed CUDA validator
+on the GPU node (`EXECUTED`; [infrastructure run](../EXPERIMENTS.md#2026-08-08--phase-0-infrastructure-bring-up-ocp-ai-cluster)).
 
 ## Access
 
 - `KUBECONFIG=cluster/auth/kubeconfig` (gitignored, local only)
 - The GPU node is billable — **scale it to 0 whenever it is not actively in use.**
-- The sandbox account is monitored and charged back; leaked credentials mean
-  environment deletion. The `aws` credentials file is gitignored — keep it that way.
+- Historical scale-down checks are `EXECUTED` only at their recorded timestamps;
+  they are not claims about current live state ([run log](../EXPERIMENTS.md)).
+- The `aws` credentials file is gitignored; never print or commit it
+  (`STATIC`; [repository rules](../AGENTS.md#3-secrets-and-safety)).

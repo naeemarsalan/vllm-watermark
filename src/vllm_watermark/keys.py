@@ -163,12 +163,12 @@ def load_keys(env: "os._Environ[str] | dict[str, str] | None" = None) -> dict[st
                 continue
             if ":" not in entry:
                 raise ValueError(
-                    f"malformed WATERMARK_KEYS entry {entry!r}; expected 'key_id:hexsecret'"
+                    "malformed WATERMARK_KEYS entry; expected 'key_id:hexsecret'"
                 )
             key_id, hex_secret = entry.split(":", 1)
             key_id = key_id.strip()
             if not key_id:
-                raise ValueError(f"malformed WATERMARK_KEYS entry {entry!r}; empty key_id")
+                raise ValueError("malformed WATERMARK_KEYS entry; empty key_id")
             if key_id in keys:
                 raise ValueError(f"duplicate key_id {key_id!r} in WATERMARK_KEYS")
             keys[key_id] = _parse_hex_secret(key_id, hex_secret)

@@ -1,0 +1,21 @@
+# EXECUTED (scoped Phase 4 build, 2026-08-08): this digest-pinned recipe was used
+# in the recorded custom-image build, including package/entry-point import smoke.
+# Fresh builds/scans remain required on changes or upgrades (`OPEN`; source:
+# EXPERIMENTS.md recovered Phase 4 transcript).
+#
+# The exact CUDA base digest came from the installed
+# rhods-operator.3.4.2 ClusterServiceVersion relatedImages list (EXECUTED
+# read-only cluster query, 2026-08-08). Re-query that installed CSV on every
+# RHOAI upgrade rather than carrying this digest forward by assumption.
+#
+# Build context is a curated temporary directory containing only this file and
+# exactly one wheel under dist/. Never submit the repository root because it
+# contains gitignored credential paths.
+FROM registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:5800e12b2a465f15961fcf34b645d79ed4f91ec9161eab22b1205d12682183c8
+
+USER 0
+COPY dist/vllm_watermark-*.whl /tmp/
+RUN python -m pip install --no-cache-dir --no-deps /tmp/vllm_watermark-*.whl \
+    && python -c 'import importlib.metadata as metadata; entries = {entry.name: entry.value for entry in metadata.entry_points(group="vllm.logits_processors")}; required = {"kgw", "synthid"}; assert required <= entries.keys(), entries; import vllm_watermark; print("vllm-watermark", metadata.version("vllm-watermark"), sorted(required))' \
+    && rm -f /tmp/vllm_watermark-*.whl
+USER 1001

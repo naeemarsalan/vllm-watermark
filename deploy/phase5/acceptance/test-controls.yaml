@@ -1,0 +1,19 @@
+---
+# EXECUTED (scoped 2026-08-09): strategic-merge patch for the bounded D10
+# acceptance run. Fault, queue, metrics, finite-scan, and detector-outage cases
+# passed with this patch; cleanup re-applied the base and verified controls were
+# `off`. For a rerun, use `oc patch --type=strategic --patch-file`, not `oc
+# apply`, and re-apply the base immediately afterward. Keep output redacted.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watermark-validation-gateway
+  namespace: watermark
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: VALIDATION_TEST_CONTROLS
+              value: "on"

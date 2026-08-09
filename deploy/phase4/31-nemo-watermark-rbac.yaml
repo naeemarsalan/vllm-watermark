@@ -1,0 +1,29 @@
+# STATIC/OPEN (Phase 4 rerun asset): the recovered run recorded a Ready managed
+# NemoGuardrails resource and its fixed-action outcomes, but this header does not
+# assert that this exact prerequisite file was applied. Fresh prerequisite and
+# CR evidence is required on rerun (facts D5/D10; source: EXPERIMENTS.md).
+#
+# STATIC for the observed operator version (source: EXPERIMENTS.md current-path
+# managed resource): with security.opendatahub.io/enable-auth enabled, TrustyAI
+# operator uses the deterministic <NemoGuardrails-name>-serviceaccount name.
+# Pre-create that account so its bounded token can be supplied to the managed
+# NeMo model client before the NemoGuardrails resource starts.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nemo-watermark-serviceaccount
+  namespace: watermark
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nemo-watermark-serviceaccount-view
+  namespace: watermark
+subjects:
+  - kind: ServiceAccount
+    name: nemo-watermark-serviceaccount
+    namespace: watermark
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view

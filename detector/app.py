@@ -10,11 +10,13 @@ surfaces:
    (`POST /api/v1/text/contents`, `GET /health`), so this service can be
    registered as a guardrails detector on the legacy FMS path (docs/facts.md
    C5) -- NOT a claim that this is the recommended future RHOAI integration
-   path; docs/facts.md C11/D5 record that NeMo Guardrails fit is still
-   partially open: the upstream NeMo 0.23.0 custom-action path is executed,
-   while the RHOAI-managed CR path remains for Phase 4. Two scheme-forced alias routes
-   (`/kgw/api/v1/text/contents`, `/synthid/api/v1/text/contents`) are also
-   exposed -- see "Scheme selection" below.
+   path. The upstream NeMo 0.23.0 action and the later internal
+   RHOAI-managed NeMo 0.21.0 metadata/broker path are executed in their
+   recorded scopes; external gateway pass-through, supportability, and broader
+   production boundaries remain open (docs/facts.md C8/C11/D5/D6/D10). Two
+   scheme-forced alias routes (`/kgw/api/v1/text/contents`,
+   `/synthid/api/v1/text/contents`) are also exposed -- see "Scheme
+   selection" below.
 2. A direct `POST /v1/watermark/detect` endpoint returning our own
    z_score/p_value/verdict-shaped response, optionally detached-JWS-signed.
 
@@ -184,18 +186,19 @@ logged with its value if it is key material)
     MODEL_TOKENIZER   HF tokenizer name or local path, default
         "Qwen/Qwen2.5-0.5B-Instruct" -- pre-loaded once at startup (lifespan),
         not per-request.
-    WATERMARK_VOCAB_SIZE   int > 0 -- MUST equal the exact vocab_size used
+    WATERMARK_VOCAB_SIZE   int in [1, 2**20] -- MUST equal the exact vocab_size used
         at GENERATION time (`vllm_config.model_config.get_vocab_size()`,
         NOT `len(tokenizer)` -- see kgw/core.py module docstring "CRITICAL
         DEVIATION"/"vocab_size is REQUIRED" for why a mismatch here
         silently produces near-zero scores with no error raised, for BOTH
         schemes). If unset, this service falls back to
-        `len(tokenizer)` at startup with a loud WARNING log (never a
-        startup crash) -- this fallback is a convenience for the
+        `len(tokenizer)` at startup with a loud WARNING log, subject to the
+        same [1, 2**20] and effective-KGW-greenlist safety checks (a failed
+        check is a startup crash) -- this fallback is a convenience for the
         `/v1/watermark/detect` smoke-test / local-dev path, not something
         to rely on on a real deployment whose model pads its embedding
         matrix past the tokenizer's own vocab length.
-    WATERMARK_Z_THRESHOLD   float, default 4.0 -- shared by both schemes'
+    WATERMARK_Z_THRESHOLD   float in [0, 100], default 4.0 -- shared by both schemes'
         `z_threshold` (both `kgw.detector.DEFAULT_Z_THRESHOLD` and
         `synthid.detector.DEFAULT_Z_THRESHOLD` already independently
         default to 4.0 -- see those modules; one shared env knob is
@@ -208,7 +211,7 @@ logged with its value if it is key material)
         "weighted_mean" -- matches docs/implementation.md Phase 2's
         explicit guidance ("start with the untrained weighted-mean
         scorer").
-    VLLM_WATERMARK_GAMMA, VLLM_WATERMARK_DELTA
+    VLLM_WATERMARK_GAMMA (0 < gamma < 1), VLLM_WATERMARK_DELTA (0 <= delta <= 100)
         REUSED, same env var NAMES and DEFAULTS ("0.25"/"2.0") as
         `vllm_watermark.kgw.processor` -- a deliberate design choice so an
         operator sets KGW params ONCE (in a shared env/ConfigMap) for both
@@ -216,9 +219,11 @@ logged with its value if it is key material)
         independently-named knobs that could silently drift apart (`delta`
         itself is carried for `KGWConfig` parity only -- the KGW detector
         math never reads `.delta`).
-    VLLM_WATERMARK_SYNTHID_NGRAM_LEN, VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE,
-    VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED, VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE,
-    VLLM_WATERMARK_SYNTHID_KEY_DEPTH
+    VLLM_WATERMARK_SYNTHID_NGRAM_LEN (1..1024),
+    VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE (1..2**24),
+    VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED (-(2**63)..2**64-1),
+    VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE (0..2**16),
+    VLLM_WATERMARK_SYNTHID_KEY_DEPTH (1..256)
         REUSED, same env var NAMES and DEFAULTS as
         `vllm_watermark.synthid.processor` (same rationale as gamma/delta
         above -- SynthID g-values silently disagree between generation and
@@ -236,13 +241,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+from uuid import UUID
 
 import jwt
 from cryptography.hazmat.primitives import serialization
@@ -284,6 +292,30 @@ _DEFAULT_SYNTHID_SAMPLING_TABLE_SIZE_ENV = str(1 << 16)
 _DEFAULT_SYNTHID_SAMPLING_TABLE_SEED_ENV = "0"
 _DEFAULT_SYNTHID_CONTEXT_HISTORY_SIZE_ENV = "1024"
 _DEFAULT_SYNTHID_KEY_DEPTH_ENV = str(DEFAULT_SYNTHID_DEPTH)
+# These are service-side safety caps, not algorithmic requirements.  They
+# bound the work an operator can request through environment configuration:
+# KGW allocates an int64 permutation proportional to vocab_size, SynthID
+# retains ngram/context-history state proportional to these settings, and
+# SynthID's g-value path does work proportional to key depth.  The caps leave
+# ample headroom over the recorded deployment (vocab 151,936; ngram 5;
+# history 1,024; depth 30) while preventing accidental host-memory/CPU blowups.
+_MAX_WATERMARK_VOCAB_SIZE = 1 << 20  # deployment cap, not algorithm compatibility
+_MAX_WATERMARK_Z_THRESHOLD = 100.0  # far beyond ordinary detector z-scores
+_MAX_KGW_DELTA = 100.0  # larger logit biases are numerically saturated in practice
+_MAX_SYNTHID_NGRAM_LEN = 1 << 10  # bounds each context tuple to 1,024 token ids
+_MAX_SYNTHID_CONTEXT_HISTORY_SIZE = 1 << 16  # bounds the per-request history window
+_MAX_SYNTHID_KEY_DEPTH = 1 << 8  # bounds per-token tournament layers/key derivation
+_MAX_SYNTHID_SAMPLING_TABLE_SIZE = 1 << 21  # 16 MiB int64 table per cache entry
+_MAX_KGW_GREENLIST_BYTES = 4 << 20
+_MAX_SYNTHID_G_VALUES_BYTES = 192 << 20
+_MAX_SYNTHID_CONTEXT_TOKENS = 1 << 14
+_MAX_DETECT_BATCH = 32
+_MAX_RAW_CHARS_PER_TEXT = 1 << 20
+_MAX_RAW_CHARS_TOTAL = 4 << 20
+_MAX_TOKENS_PER_TEXT = 1 << 17
+_MAX_TOKENS_TOTAL = 1 << 18
+_MIN_TORCH_SEED = -(1 << 63)
+_MAX_TORCH_SEED = (1 << 64) - 1
 
 # Sanity check (module import time, not a runtime env read): both schemes'
 # own DEFAULT_Z_THRESHOLD constants already agree at 4.0 -- see module
@@ -298,6 +330,11 @@ def _content_digest(content: str) -> str:
     """First 16 hex chars of sha256(content) -- the ONLY content-derived
     value this service ever logs. See module docstring "Zero retention"."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
+def _content_sha256(content: str) -> str:
+    """Full SHA-256 used only for API correlation, never log output."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _calibrated_score(p_value: float) -> float:
@@ -359,6 +396,52 @@ def _env_bool(env: Mapping[str, str], name: str, default: str) -> bool:
     raise RuntimeError(f"{name} must be 'on'/'off' (or a boolean-like string), got {v!r}")
 
 
+def _env_int(
+    env: Mapping[str, str], name: str, default: str, *, minimum: int | None = None, maximum: int | None = None
+) -> int:
+    """Read a bounded integer env setting without deferring invalid config
+    until request handling. Bounds are inclusive when supplied."""
+    raw = env.get(name, default)
+    if not isinstance(raw, str):
+        raise RuntimeError(f"{name} must be an integer")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if minimum is not None and value < minimum:
+        raise RuntimeError(f"{name} must be >= {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise RuntimeError(f"{name} must be <= {maximum}, got {value}")
+    return value
+
+
+def _env_finite_float(
+    env: Mapping[str, str], name: str, default: str, *, minimum: float | None = None,
+    minimum_exclusive: bool = False, maximum: float | None = None, maximum_exclusive: bool = False,
+) -> float:
+    """Read a finite bounded float env setting.
+
+    Rejecting NaN/Infinity at startup is essential: both can otherwise pass
+    ordinary comparisons and create a detector which is ready but unusable.
+    """
+    raw = env.get(name, default)
+    if not isinstance(raw, str):
+        raise RuntimeError(f"{name} must be a finite number")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} must be a finite number") from exc
+    if not math.isfinite(value):
+        raise RuntimeError(f"{name} must be a finite number")
+    if minimum is not None and (value <= minimum if minimum_exclusive else value < minimum):
+        operator = ">" if minimum_exclusive else ">="
+        raise RuntimeError(f"{name} must be {operator} {minimum}, got {value}")
+    if maximum is not None and (value >= maximum if maximum_exclusive else value > maximum):
+        operator = "<" if maximum_exclusive else "<="
+        raise RuntimeError(f"{name} must be {operator} {maximum}, got {value}")
+    return value
+
+
 def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     """Parse all env-driven config into a `Settings` instance. Pure
     function of `env` (defaults to `os.environ`) -- no I/O, no side
@@ -377,51 +460,124 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
             f"WATERMARK_SYNTHID_SCORER must be one of {_VALID_SYNTHID_SCORERS!r}, got {synthid_scorer!r}"
         )
 
-    raw_vocab = env.get("WATERMARK_VOCAB_SIZE")
     vocab_size_env: Optional[int] = None
-    if raw_vocab is not None and raw_vocab.strip():
-        vocab_size_env = int(raw_vocab)
-        if vocab_size_env <= 0:
-            raise RuntimeError(f"WATERMARK_VOCAB_SIZE must be positive, got {vocab_size_env}")
+    if "WATERMARK_VOCAB_SIZE" in env:
+        raw_vocab = env.get("WATERMARK_VOCAB_SIZE")
+        if not isinstance(raw_vocab, str):
+            raise RuntimeError("WATERMARK_VOCAB_SIZE must be an integer")
+        vocab_size_env = _env_int(
+            env, "WATERMARK_VOCAB_SIZE", raw_vocab, minimum=1, maximum=_MAX_WATERMARK_VOCAB_SIZE
+        )
 
-    return Settings(
+    settings = Settings(
         default_scheme=default_scheme,
         model_tokenizer=env.get("MODEL_TOKENIZER", _DEFAULT_MODEL_TOKENIZER),
         vocab_size_env=vocab_size_env,
-        z_threshold=float(env.get("WATERMARK_Z_THRESHOLD", _DEFAULT_Z_THRESHOLD_ENV)),
-        kgw_gamma=float(env.get("VLLM_WATERMARK_GAMMA", _DEFAULT_KGW_GAMMA_ENV)),
-        kgw_delta=float(env.get("VLLM_WATERMARK_DELTA", _DEFAULT_KGW_DELTA_ENV)),
+        z_threshold=_env_finite_float(
+            env, "WATERMARK_Z_THRESHOLD", _DEFAULT_Z_THRESHOLD_ENV,
+            minimum=0.0, maximum=_MAX_WATERMARK_Z_THRESHOLD,
+        ),
+        kgw_gamma=_env_finite_float(
+            env, "VLLM_WATERMARK_GAMMA", _DEFAULT_KGW_GAMMA_ENV,
+            minimum=0.0, minimum_exclusive=True, maximum=1.0, maximum_exclusive=True,
+        ),
+        kgw_delta=_env_finite_float(
+            env, "VLLM_WATERMARK_DELTA", _DEFAULT_KGW_DELTA_ENV,
+            minimum=0.0, maximum=_MAX_KGW_DELTA,
+        ),
         kgw_ignore_repeated_ngrams=_env_bool(
             env, "WATERMARK_KGW_IGNORE_REPEATED_NGRAMS", _DEFAULT_KGW_IGNORE_REPEATED_NGRAMS_ENV
         ),
         synthid_scorer=synthid_scorer,
-        synthid_ngram_len=int(
-            env.get("VLLM_WATERMARK_SYNTHID_NGRAM_LEN", _DEFAULT_SYNTHID_NGRAM_LEN_ENV)
+        synthid_ngram_len=_env_int(
+            env, "VLLM_WATERMARK_SYNTHID_NGRAM_LEN", _DEFAULT_SYNTHID_NGRAM_LEN_ENV,
+            minimum=1, maximum=_MAX_SYNTHID_NGRAM_LEN,
         ),
-        synthid_sampling_table_size=int(
-            env.get(
-                "VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE",
-                _DEFAULT_SYNTHID_SAMPLING_TABLE_SIZE_ENV,
-            )
+        synthid_sampling_table_size=_env_int(
+            env, "VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SIZE",
+            _DEFAULT_SYNTHID_SAMPLING_TABLE_SIZE_ENV, minimum=1, maximum=_MAX_SYNTHID_SAMPLING_TABLE_SIZE,
         ),
-        synthid_sampling_table_seed=int(
-            env.get(
-                "VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED",
-                _DEFAULT_SYNTHID_SAMPLING_TABLE_SEED_ENV,
-            )
+        synthid_sampling_table_seed=_env_int(
+            env, "VLLM_WATERMARK_SYNTHID_SAMPLING_TABLE_SEED",
+            _DEFAULT_SYNTHID_SAMPLING_TABLE_SEED_ENV, minimum=_MIN_TORCH_SEED, maximum=_MAX_TORCH_SEED,
         ),
-        synthid_context_history_size=int(
-            env.get(
-                "VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE",
-                _DEFAULT_SYNTHID_CONTEXT_HISTORY_SIZE_ENV,
-            )
+        synthid_context_history_size=_env_int(
+            env, "VLLM_WATERMARK_SYNTHID_CONTEXT_HISTORY_SIZE",
+            _DEFAULT_SYNTHID_CONTEXT_HISTORY_SIZE_ENV, minimum=0,
+            maximum=_MAX_SYNTHID_CONTEXT_HISTORY_SIZE,
         ),
-        synthid_key_depth=int(
-            env.get("VLLM_WATERMARK_SYNTHID_KEY_DEPTH", _DEFAULT_SYNTHID_KEY_DEPTH_ENV)
+        synthid_key_depth=_env_int(
+            env, "VLLM_WATERMARK_SYNTHID_KEY_DEPTH", _DEFAULT_SYNTHID_KEY_DEPTH_ENV,
+            minimum=1, maximum=_MAX_SYNTHID_KEY_DEPTH,
         ),
         signing_key_path=env.get("SIGNING_KEY_PATH") or None,
         signing_key_id=env.get("SIGNING_KEY_ID") or None,
     )
+    if settings.vocab_size_env is not None:
+        _validate_resource_budgets(settings.vocab_size_env, settings)
+    return settings
+
+
+def _validate_kgw_greenlist_size(vocab_size: int, gamma: float) -> None:
+    """Reject a valid-looking pair that would construct an empty greenlist."""
+    greenlist_size = int(vocab_size * gamma)
+    if greenlist_size < 1:
+        raise RuntimeError(
+            "effective KGW greenlist_size must be >= 1; increase WATERMARK_VOCAB_SIZE "
+            "or VLLM_WATERMARK_GAMMA"
+        )
+    if greenlist_size * 8 > _MAX_KGW_GREENLIST_BYTES:
+        raise RuntimeError("effective KGW greenlist exceeds the 4 MiB deployment budget")
+
+
+def _validate_resource_budgets(vocab_size: int, settings: Settings) -> None:
+    """Reject cross-parameter combinations before detector allocations."""
+    _validate_kgw_greenlist_size(vocab_size, settings.kgw_gamma)
+    if settings.synthid_sampling_table_size * 8 > 16 << 20:
+        raise RuntimeError("SynthID sampling table exceeds the 16 MiB deployment budget")
+    if 3 * vocab_size * settings.synthid_key_depth * 8 > _MAX_SYNTHID_G_VALUES_BYTES:
+        raise RuntimeError("three SynthID vocab-by-depth matrices exceed the 192 MiB g-value budget")
+    if settings.synthid_context_history_size * max(0, settings.synthid_ngram_len - 1) > _MAX_SYNTHID_CONTEXT_TOKENS:
+        raise RuntimeError("SynthID context history token capacity exceeds the 16384-token per-row deployment budget")
+
+
+def _validate_tokenizer_vocab_size(vocab_size: int, gamma: float) -> int:
+    """Validate the tokenizer-derived fallback using the same startup rules."""
+    if isinstance(vocab_size, bool) or not isinstance(vocab_size, int):
+        raise RuntimeError("tokenizer vocabulary size must be an integer")
+    if not 1 <= vocab_size <= _MAX_WATERMARK_VOCAB_SIZE:
+        raise RuntimeError(
+            "tokenizer vocabulary size must be in [1, "
+            f"{_MAX_WATERMARK_VOCAB_SIZE}]"
+        )
+    # The tokenizer-derived vocabulary is subject to the same deployment
+    # resource budget as an explicitly configured vocabulary.
+    return vocab_size
+
+
+def _validate_raw_request_limits(contents: List[str]) -> None:
+    """Reject oversized detector batches before tokenizer work (HTTP 413)."""
+    if len(contents) > _MAX_DETECT_BATCH:
+        raise HTTPException(status_code=413, detail="detector batch is too large")
+    total = 0
+    for content in contents:
+        chars = len(content)
+        if chars > _MAX_RAW_CHARS_PER_TEXT:
+            raise HTTPException(status_code=413, detail="detector text is too large")
+        total += chars
+    if total > _MAX_RAW_CHARS_TOTAL:
+        raise HTTPException(status_code=413, detail="detector batch text is too large")
+
+
+def _validate_token_limits(token_batches: List[List[int]]) -> None:
+    """Reject oversized tokenized inputs before detector scoring (HTTP 413)."""
+    total = 0
+    for token_ids in token_batches:
+        if len(token_ids) > _MAX_TOKENS_PER_TEXT:
+            raise HTTPException(status_code=413, detail="detector text has too many tokens")
+        total += len(token_ids)
+    if total > _MAX_TOKENS_TOTAL:
+        raise HTTPException(status_code=413, detail="detector batch has too many tokens")
 
 
 def _load_signing_key(path: Optional[str]):
@@ -700,6 +856,7 @@ def _analyze_contents_sync(
     loop free during detector inference (see module docstring citation).
     """
     settings: Settings = state.settings
+    _validate_raw_request_limits(contents)
     keys: Dict[str, WatermarkKey] = state.keys
     if not keys:
         raise HTTPException(status_code=503, detail="no watermark keys configured")
@@ -711,12 +868,13 @@ def _analyze_contents_sync(
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    token_batches = [state.tokenizer.encode(content, add_special_tokens=False) for content in contents]
+    _validate_token_limits(token_batches)
+
     results: List[List[ContentAnalysisResponse]] = []
-    for content in contents:
+    for content, token_ids in zip(contents, token_batches):
         t0 = time.monotonic()
         digest = _content_digest(content)
-        token_ids = state.tokenizer.encode(content, add_special_tokens=False)
-
         try:
             scored = score_token_ids(token_ids, scheme, key, settings, state.vocab_size)
         except InsufficientTokensError:
@@ -795,6 +953,8 @@ class DetectRequest(BaseModel):
     texts: Optional[List[str]] = None
     key_id: Optional[str] = None
     scheme: Optional[str] = None
+    validation_id: Optional[str] = None
+    response_id: Optional[str] = None
 
     @field_validator("scheme")
     @classmethod
@@ -806,28 +966,68 @@ class DetectRequest(BaseModel):
             raise ValueError(f"scheme must be one of {VALID_SCHEMES!r}, got {v!r}")
         return normalized
 
+    @field_validator("validation_id")
+    @classmethod
+    def _validate_validation_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        if not isinstance(v, str) or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", v
+        ):
+            raise ValueError("validation_id must be a canonical lowercase UUID string")
+        try:
+            parsed = UUID(v)
+        except ValueError as exc:
+            raise ValueError("validation_id must be a canonical lowercase UUID string") from exc
+        if str(parsed) != v:
+            raise ValueError("validation_id must be a canonical lowercase UUID string")
+        return v
+
+    @field_validator("response_id")
+    @classmethod
+    def _validate_response_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", v):
+            raise ValueError("response_id must be a bounded safe identifier")
+        return v
+
     @model_validator(mode="after")
     def _check_text_xor_texts(self) -> "DetectRequest":
         if (self.text is None) == (self.texts is None):
             raise ValueError("exactly one of 'text' or 'texts' must be provided")
         if self.texts is not None and len(self.texts) == 0:
             raise ValueError("'texts' must be a non-empty list")
+        if self.texts is not None and (self.validation_id is not None or self.response_id is not None):
+            raise ValueError("validation_id and response_id are supported only with a single 'text'")
         return self
 
 
 def _build_detect_result(
-    text: str, scheme: str, key: WatermarkKey, settings: Settings, state: Any, index: Optional[int] = None
+    text: str,
+    scheme: str,
+    key: WatermarkKey,
+    settings: Settings,
+    state: Any,
+    validation_id: Optional[str] = None,
+    response_id: Optional[str] = None,
+    index: Optional[int] = None,
+    token_ids: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     digest = _content_digest(text)
+    content_sha256 = _content_sha256(text)
     t0 = time.monotonic()
-    token_ids = state.tokenizer.encode(text, add_special_tokens=False)
+    if token_ids is None:
+        token_ids = state.tokenizer.encode(text, add_special_tokens=False)
+    _validate_token_limits([token_ids])
     try:
         scored = score_token_ids(token_ids, scheme, key, settings, state.vocab_size)
     except InsufficientTokensError as exc:
         latency_ms = (time.monotonic() - t0) * 1000
         logger.info(
-            "watermark_detect content_sha256_16=%s scheme=%s key_id=%s "
+            "watermark_detect validation_id=%s content_sha256_16=%s scheme=%s key_id=%s "
             "verdict=error(insufficient_tokens) latency_ms=%.2f",
+            validation_id or "-",
             digest,
             scheme,
             key.key_id,
@@ -840,7 +1040,9 @@ def _build_detect_result(
 
     latency_ms = (time.monotonic() - t0) * 1000
     logger.info(
-        "watermark_detect content_sha256_16=%s scheme=%s key_id=%s verdict=%s z=%.3f latency_ms=%.2f",
+        "watermark_detect validation_id=%s content_sha256_16=%s scheme=%s key_id=%s "
+        "verdict=%s z=%.3f latency_ms=%.2f",
+        validation_id or "-",
         digest,
         scheme,
         key.key_id,
@@ -850,6 +1052,9 @@ def _build_detect_result(
     )
 
     return {
+        "validation_id": validation_id,
+        "response_id": response_id,
+        "content_sha256": content_sha256,
         "scheme": scheme,
         "key_id": key.key_id,
         "verdict": scored["verdict"],
@@ -880,13 +1085,15 @@ async def _lifespan(app: FastAPI):
     if settings.vocab_size_env is not None:
         app.state.vocab_size = settings.vocab_size_env
     else:
-        app.state.vocab_size = len(tokenizer)
+        app.state.vocab_size = _validate_tokenizer_vocab_size(len(tokenizer), settings.kgw_gamma)
         logger.warning(
             "WATERMARK_VOCAB_SIZE not set; falling back to len(tokenizer)=%d. This "
             "MUST match the exact vocab_size used at generation time or scores will "
             "be silently near-zero -- see app.py module docstring 'WATERMARK_VOCAB_SIZE'.",
             app.state.vocab_size,
         )
+
+    _validate_resource_budgets(app.state.vocab_size, settings)
 
     try:
         app.state.keys = load_keys()
@@ -929,7 +1136,8 @@ def create_app() -> FastAPI:
         state = request.app.state
         tokenizer_ready = getattr(state, "tokenizer", None) is not None
         keys = getattr(state, "keys", None) or {}
-        if tokenizer_ready and keys:
+        default_key = getattr(state, "default_key", None)
+        if tokenizer_ready and default_key is not None:
             return {"status": "ready", "tokenizer_loaded": True, "key_ids": sorted(keys)}
         raise HTTPException(
             status_code=503,
@@ -937,6 +1145,7 @@ def create_app() -> FastAPI:
                 "status": "not_ready",
                 "tokenizer_loaded": tokenizer_ready,
                 "keys_configured": bool(keys),
+                "default_key_configured": default_key is not None,
             },
         )
 
@@ -964,8 +1173,39 @@ def create_app() -> FastAPI:
     @app.post("/v1/watermark/detect")
     async def watermark_detect(req: DetectRequest, request: Request) -> Dict[str, Any]:
         state = request.app.state
+        _validate_raw_request_limits([req.text] if req.text is not None else (req.texts or []))
         settings: Settings = state.settings
         scheme = req.scheme or settings.default_scheme
+
+        header_validation_id = request.headers.get("x-watermark-validation-id")
+        if header_validation_id is not None:
+            if not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                header_validation_id,
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="X-Watermark-Validation-Id must be a canonical lowercase UUID string",
+                )
+            try:
+                header_validation_id = str(UUID(header_validation_id))
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="X-Watermark-Validation-Id must be a canonical lowercase UUID string",
+                ) from exc
+        if req.validation_id is not None and header_validation_id is not None:
+            if req.validation_id != header_validation_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="validation_id body/header values must match",
+                )
+        validation_id = req.validation_id or header_validation_id
+        if req.texts is not None and (validation_id is not None or req.response_id is not None):
+            raise HTTPException(
+                status_code=422,
+                detail="validation_id and response_id are supported only with a single 'text'",
+            )
 
         if not state.keys:
             raise HTTPException(status_code=503, detail="no watermark keys configured")
@@ -976,15 +1216,30 @@ def create_app() -> FastAPI:
 
         if req.text is not None:
             payload: Dict[str, Any] = await run_in_threadpool(
-                _build_detect_result, req.text, scheme, key, settings, state
+                _build_detect_result, req.text, scheme, key, settings, state, validation_id, req.response_id
             )
         else:
             texts = req.texts or []
 
             def _build_all() -> List[Dict[str, Any]]:
+                token_batches = [
+                    state.tokenizer.encode(text, add_special_tokens=False)
+                    for text in texts
+                ]
+                _validate_token_limits(token_batches)
                 return [
-                    _build_detect_result(t, scheme, key, settings, state, index=i)
-                    for i, t in enumerate(texts)
+                    _build_detect_result(
+                        text,
+                        scheme,
+                        key,
+                        settings,
+                        state,
+                        index=index,
+                        token_ids=token_ids,
+                    )
+                    for index, (text, token_ids) in enumerate(
+                        zip(texts, token_batches)
+                    )
                 ]
 
             results = await run_in_threadpool(_build_all)

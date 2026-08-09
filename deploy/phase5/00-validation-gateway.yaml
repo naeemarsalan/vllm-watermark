@@ -1,0 +1,235 @@
+---
+# EXECUTED (scoped 2026-08-09; Phase 5): deployment template for the D10
+# validation gateway. Build5 and the 1/1 Recreate deployment were executed with
+# the immutable image digest below. Reruns must preserve secret safety and use a
+# newly observed immutable digest; this manifest never supplies keys in
+# literals,
+# logs, command arguments, or metric labels.
+# STATIC design sources for the Service CA, bounded timing, test-control, and
+# volume comments below: validation/gateway.py, validation/http_clients.py, and
+# this manifest. EXECUTED runtime source: EXPERIMENTS.md 2026-08-09 current-path
+# record. Platform-wide retention and production network policy remain OPEN.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: watermark-validation-gateway
+  namespace: watermark
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watermark-validation-gateway-service-ca
+  namespace: watermark
+  annotations:
+    # OpenShift Service CA injects service-ca.crt asynchronously. The runtime
+    # is configured with its exact projected path and fails startup until a
+    # usable bundle is present; TLS verification is never disabled.
+    service.beta.openshift.io/inject-cabundle: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: watermark-validation-gateway-state
+  namespace: watermark
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: watermark-validation-gateway
+  namespace: watermark
+  labels:
+    app.kubernetes.io/name: watermark-validation-gateway
+spec:
+  selector:
+    app.kubernetes.io/name: watermark-validation-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watermark-validation-gateway
+  namespace: watermark
+  labels:
+    app.kubernetes.io/name: watermark-validation-gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: watermark-validation-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: watermark-validation-gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: watermark-validation-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # One upstream attempt plus three bounded validation attempts can span
+      # slightly over 40 seconds at the configured limits.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          # CPU image build executed on 2026-08-09; pin the observed immutable
+          # registry digest. Deployment/runtime acceptance is recorded
+          # separately and must not be inferred from the successful build.
+          image: >-
+            image-registry.openshift-image-registry.svc:5000/watermark/watermark-validation-gateway@sha256:9443345c272c55a6dcea41bae84f8e04bab5d0f27e0934df2e4b4ff11b37fed6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VALIDATION_HOST
+              value: 0.0.0.0
+            - name: VALIDATION_PORT
+              value: "8080"
+            - name: VALIDATION_SAMPLE_EVERY
+              value: "5"
+            - name: VALIDATION_SAMPLER_DB_PATH
+              value: /var/lib/watermark-validation/sampler.sqlite
+            - name: VALIDATION_REPLICA_COUNT
+              value: "1"
+            - name: VALIDATION_FAILURE_POLICY
+              value: closed
+            - name: VALIDATION_POSITIVE_POLICY
+              value: flag
+            # Fault injection and consumer pause/resume are forbidden in the
+            # base deployment.  The acceptance-only overlay changes this to
+            # "on" for a bounded D10 run and must then be removed.
+            - name: VALIDATION_TEST_CONTROLS
+              value: "off"
+            - name: VALIDATION_MAX_ATTEMPTS
+              value: "3"
+            - name: VALIDATION_RETRY_BACKOFF_SECONDS
+              value: "0.05"
+            - name: VALIDATION_MAX_RETRY_ELAPSED_SECONDS
+              value: "35"
+            - name: VALIDATION_ATTEMPT_TIMEOUT_SECONDS
+              value: "10"
+            - name: VALIDATION_QUEUE_CAPACITY
+              value: "32"
+            - name: VALIDATION_MAX_INFLIGHT
+              value: "4"
+            - name: VALIDATION_HTTP_TIMEOUT_SECONDS
+              value: "10"
+            - name: VALIDATION_MAX_RESPONSE_BYTES
+              value: "1048576"
+            - name: VALIDATION_TLS_VERIFY
+              value: "true"
+            - name: VALIDATION_TLS_CA_BUNDLE
+              value: >-
+                /var/run/secrets/watermark-validation-ca/service-ca.crt
+            - name: VALIDATION_UPSTREAM_URL
+              value: >-
+                http://watermark-vllm-predictor.watermark.svc.cluster.local:8080
+            - name: VALIDATION_DETECTOR_URL
+              value: >-
+                http://detector.watermark.svc.cluster.local:8000/v1/watermark/detect
+            - name: VALIDATION_NEMO_URL
+              value: >-
+                https://nemo-watermark.watermark.svc
+            - name: VALIDATION_NEMO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: watermark-validation-gateway-auth
+                  key: nemo-token
+            - name: VALIDATION_NEMO_CONFIG_ID
+              value: watermark-validation
+            - name: VALIDATION_NEMO_MODEL
+              value: watermark-vllm
+            - name: VALIDATION_BROKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: watermark-validation-gateway-auth
+                  key: broker-token
+            - name: VALIDATION_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: watermark-validation-gateway-auth
+                  key: admin-token
+            - name: VLLM_WATERMARK_DEFAULT
+              value: "off"
+            - name: VLLM_WATERMARK_SCHEME
+              value: kgw
+            - name: WATERMARK_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: watermark-key
+                  key: WATERMARK_KEY_ID
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/watermark-validation
+            # OpenShift populates service-ca.crt. The fixed runtime path above
+            # makes a missing or malformed bundle a startup failure.
+            - name: outbound-ca
+              mountPath: /var/run/secrets/watermark-validation-ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: watermark-validation-gateway-state
+        - name: outbound-ca
+          configMap:
+            name: watermark-validation-gateway-service-ca
+            optional: true
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

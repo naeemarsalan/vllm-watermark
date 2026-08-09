@@ -1,0 +1,110 @@
+---
+# EXECUTED (scoped Phase 4 deployment, 2026-08-08): the digest-pinned custom
+# runtime reached the recorded RHOAI ServingRuntime/InferenceService internal
+# predictor path. A rerun requires fresh image and server-side evidence; this
+# does not establish external gateway pass-through or D6 supportability
+# (`OPEN`; facts C8/D6; source: EXPERIMENTS.md recovered transcript).
+#
+# Shape/source: RHOAI 3.4 "ServingRuntime" vLLM example:
+# https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/pdf/configuring_your_model-serving_platform/Red_Hat_OpenShift_AI_Self-Managed-3.4-Configuring_your_model-serving_platform-en-US.pdf
+#
+# STATIC source contract (src/vllm_watermark/ entry points): the package loads
+# processors once through its installed vLLM entry points.
+# Do not add --logits-processors for either processor: the Phase 1 corrected
+# run established that combining the entry point and FQCN flag double-loads it
+# (EXECUTED; source: EXPERIMENTS.md Phase 1 correction).
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: watermark-vllm
+  namespace: watermark
+  annotations:
+    opendatahub.io/recommended-accelerators: '["nvidia.com/gpu"]'
+    openshift.io/display-name: Watermark-enabled vLLM ServingRuntime
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  annotations:
+    prometheus.io/path: /metrics
+    prometheus.io/port: "8080"
+  multiModel: false
+  supportedModelFormats:
+    - autoSelect: false
+      name: vLLM
+  containers:
+    - name: kserve-container
+      # EXECUTED 2026-08-08: OpenShift Build watermark-vllm-3 pushed this
+      # immutable digest; raw output is recorded in EXPERIMENTS.md.
+      # yamllint disable-line rule:line-length
+      image: image-registry.openshift-image-registry.svc:5000/watermark/watermark-vllm@sha256:f8294ee0459869e9659b1178ed91f57a1b52a52c6a5f5f819ca651646b317e4c
+      command:
+        - python
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --port=8080
+        - --model=/mnt/models
+        - --served-model-name={{.Name}}
+      env:
+        - name: HOME
+          value: /tmp/hf_home
+        - name: HF_HOME
+          value: /tmp/hf_home
+        # Prevent Kubernetes Service env injection from turning VLLM_PORT into
+        # a tcp:// URI when another Service is named "vllm".
+        - name: VLLM_PORT
+          value: "8080"
+        - name: VLLM_WATERMARK_DEFAULT
+          value: "on"
+        - name: VLLM_WATERMARK_SCHEME
+          value: kgw
+        - name: WATERMARK_KEY
+          valueFrom:
+            secretKeyRef:
+              name: watermark-key
+              key: WATERMARK_KEY
+        - name: WATERMARK_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: watermark-key
+              key: WATERMARK_KEY_ID
+              optional: true
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        failureThreshold: 60
+        periodSeconds: 10
+        # STATIC alignment: use the 5-second health-probe timeout selected
+        # after the EXECUTED Phase-0 liveness failure; see EXPERIMENTS.md.
+        timeoutSeconds: 5
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        periodSeconds: 10
+        # STATIC alignment with the readiness timeout selected after the
+        # EXECUTED Phase-0 liveness failure; see EXPERIMENTS.md.
+        timeoutSeconds: 5
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        # STATIC alignment with the 300-second grace used after the EXECUTED
+        # Phase-0 liveness failure; see EXPERIMENTS.md.
+        initialDelaySeconds: 300
+        periodSeconds: 30
+        # STATIC alignment with the 10-second liveness timeout selected after
+        # the EXECUTED Phase-0 failure; see EXPERIMENTS.md.
+        timeoutSeconds: 10
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault

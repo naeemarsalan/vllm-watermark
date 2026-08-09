@@ -78,12 +78,20 @@ transformers' 3.0). Per Task A spec, not a transformers equivalence claim.
 from __future__ import annotations
 
 import math
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 
 from vllm_watermark.kgw.core import KGWConfig, greenlist_ids
 
 DEFAULT_Z_THRESHOLD = 4.0
+_MAX_GREENLIST_CACHE_ENTRIES = 32
+_GREENLIST_CACHE_BUDGET_BYTES = 64 << 20
+_PY_SET_BYTES_PER_TOKEN = 96  # conservative Python int/set accounting
+
+
+def _greenlist_cache_capacity(cfg: KGWConfig) -> int:
+    per_entry = max(1, cfg.greenlist_size * _PY_SET_BYTES_PER_TOKEN)
+    return max(1, min(_MAX_GREENLIST_CACHE_ENTRIES, _GREENLIST_CACHE_BUDGET_BYTES // per_entry))
 
 
 @dataclass(frozen=True)
@@ -151,13 +159,18 @@ def score_token_ids(
     # on prev_token (lefthash, context_width=1), so this is both correct
     # and avoids recomputing a torch.randperm per token when prev_token
     # repeats -- true regardless of ignore_repeated_ngrams.
-    greenlist_cache: dict[int, set[int]] = {}
+    greenlist_cache: "OrderedDict[int, set[int]]" = OrderedDict()
+    cache_capacity = _greenlist_cache_capacity(cfg)
 
     def is_green(prev_token: int, target_token: int) -> bool:
         cached = greenlist_cache.get(prev_token)
         if cached is None:
             cached = set(greenlist_ids(prev_token, cfg).tolist())
             greenlist_cache[prev_token] = cached
+            if len(greenlist_cache) > cache_capacity:
+                greenlist_cache.popitem(last=False)
+        else:
+            greenlist_cache.move_to_end(prev_token)
         return target_token in cached
 
     if ignore_repeated_ngrams:

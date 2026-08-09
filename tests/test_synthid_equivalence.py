@@ -259,6 +259,10 @@ def test_sampling_table_deterministic_and_cpu():
     assert set(t1.unique().tolist()) <= {0, 1}
 
 
+def test_sampling_table_cache_has_bounded_aggregate_entries():
+    assert _sampling_table.cache_info().maxsize == 4
+
+
 def test_g_values_deterministic():
     cfg = SynthIDConfig(vocab_size=200, keys=(1, 2, 3), ngram_len=4, sampling_table_size=512, sampling_table_seed=9)
     g1 = g_values([5, 6, 7], torch.arange(50), cfg)

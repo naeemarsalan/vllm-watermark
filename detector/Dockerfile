@@ -17,14 +17,11 @@
 # directory, and Buildah's COPY cannot reach outside the build context. All
 # COPY paths below are therefore written relative to the REPO ROOT.
 #
-# Base image: python:3.12-slim (task-specified). Pinned by tag, not digest --
-# unlike the vLLM base image in deploy/phase0 (large, rebuilt rarely), this
-# image is expected to be rebuilt on every vllm_watermark wheel change, and
-# Docker Hub retags `3.12-slim` frequently with Debian security patches. If a
-# fully reproducible pin is later required, resolve the digest actually
-# pulled via `oc describe build detector-<N> | grep -i "docker image"` after
-# a build and switch this line to `python:3.12-slim@sha256:<digest>`.
-FROM python:3.12-slim
+# Base image: the official linux/amd64 `python:3.12-slim` reference resolved
+# and was re-checked by immutable digest on 2026-08-08.  The command and raw
+# output are registered in EXPERIMENTS.md under the Phase 5 gateway base-image
+# resolution entry; both CPU services intentionally share this exact base.
+FROM docker.io/library/python@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
 # --- torch (CPU wheel) ----------------------------------------------------
 # EXECUTED verification (2026-08-08, see EXPERIMENTS.md this task's entry):

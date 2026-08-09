@@ -1,0 +1,36 @@
+# EXECUTED (scoped Phase 4 state, 2026-08-08): the target cluster reported
+# rhods-operator.3.4.2 Succeeded. This asset remains a rerunnable declarative
+# install recipe; its state claim is sourced from the recovered transcript below.
+#
+# Source: Red Hat OpenShift AI Self-Managed 3.4, "Installing the Red Hat
+# OpenShift AI Operator by using the CLI":
+# https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/installing_and_uninstalling_openshift_ai_self-managed/installing-and-deploying-openshift-ai_install
+#
+# Read-only catalog inspection on 2026-08-08 found stable-3.4 currentCSV
+# rhods-operator.3.4.2 in redhat-operators/openshift-marketplace. That is
+# discovery evidence only. Source: EXPERIMENTS.md, recovered Phase 4 transcript
+# (operator CSV call); reruns require fresh server-side validation (`OPEN`).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redhat-ods-operator
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: rhods-operator
+  namespace: redhat-ods-operator
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: rhods-operator
+  namespace: redhat-ods-operator
+spec:
+  channel: stable-3.4
+  installPlanApproval: Manual
+  name: rhods-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  startingCSV: rhods-operator.3.4.2

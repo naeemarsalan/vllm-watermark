@@ -1,0 +1,974 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="An evidence-backed engineering write-up and animated reference architecture for decode-time text watermarking with vLLM on OpenShift AI.">
+<meta property="og:title" content="Mark, detect, repeat — text watermarking with vLLM on OpenShift AI">
+<meta property="og:description" content="EU transparency context, executed evidence and an animated continuous-validation architecture.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://naeemarsalan.github.io/vllm-watermark/">
+<link rel="canonical" href="https://naeemarsalan.github.io/vllm-watermark/">
+<title>Mark, detect, repeat — text watermarking with vLLM on OpenShift AI</title>
+<style>
+  /*
+   * Architecture player adapted from refarch-animator at commit
+   * bae887f87f449d2301ba2ad473bdcd585acc4e0c (MIT).
+   * https://github.com/naeemarsalan/refarch-animator
+   */
+  :root {
+    --bg:#F3F3F3; --surface:#FFFFFF; --band:#E7E7E7; --zone:#ECECEC; --subzone:#F8F8F8;
+    --ink:#151515; --ink2:#3F3F3F; --ink3:#5E5E5E; --line:#C7C7C7; --line-soft:#DEDEDE;
+    --brand:#C9190B; --brand-deep:#7A1A12; --brand-soft:#FFF1EF;
+    --zone-a:#1D4174; --zone-b:#4CB6D6;
+    --flow-1:#D97E13; --flow-2:#5E40BE; --flow-3:#167D9A;
+    --ok:#467A22; --ok-soft:#EEF7E8; --warn:#8A5B00; --warn-soft:#FFF6DD;
+    --open:#6A6E73; --open-soft:#F1F1F1; --meter-bg:#EAEAEA;
+    --hero:#171717; --hero-ink:#FFFFFF; --hero-muted:#D6D6D6;
+    --max:1180px;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg:#171717; --surface:#262626; --band:#111111; --zone:#222222; --subzone:#1E1E1E;
+    --ink:#F2F2F2; --ink2:#D0D0D0; --ink3:#AAAAAA; --line:#505050; --line-soft:#393939;
+    --brand:#FF5C4D; --brand-deep:#FF8A80; --brand-soft:#3A201E;
+    --zone-a:#7EA6DE; --zone-b:#58C4E3;
+    --flow-1:#FAAA4F; --flow-2:#A994F0; --flow-3:#64C7E3;
+    --ok:#9ACB68; --ok-soft:#22351A; --warn:#E7B64C; --warn-soft:#3A301C;
+    --open:#B3B6B8; --open-soft:#303030; --meter-bg:#333333;
+    --hero:#0E0E0E; --hero-ink:#FFFFFF; --hero-muted:#C6C6C6;
+  } }
+  :root[data-theme="light"] {
+    --bg:#F3F3F3; --surface:#FFFFFF; --band:#E7E7E7; --zone:#ECECEC; --subzone:#F8F8F8;
+    --ink:#151515; --ink2:#3F3F3F; --ink3:#5E5E5E; --line:#C7C7C7; --line-soft:#DEDEDE;
+    --brand:#C9190B; --brand-deep:#7A1A12; --brand-soft:#FFF1EF;
+    --zone-a:#1D4174; --zone-b:#4CB6D6;
+    --flow-1:#D97E13; --flow-2:#5E40BE; --flow-3:#167D9A;
+    --ok:#467A22; --ok-soft:#EEF7E8; --warn:#8A5B00; --warn-soft:#FFF6DD;
+    --open:#6A6E73; --open-soft:#F1F1F1; --meter-bg:#EAEAEA;
+    --hero:#171717; --hero-ink:#FFFFFF; --hero-muted:#D6D6D6;
+  }
+  :root[data-theme="dark"] {
+    --bg:#171717; --surface:#262626; --band:#111111; --zone:#222222; --subzone:#1E1E1E;
+    --ink:#F2F2F2; --ink2:#D0D0D0; --ink3:#AAAAAA; --line:#505050; --line-soft:#393939;
+    --brand:#FF5C4D; --brand-deep:#FF8A80; --brand-soft:#3A201E;
+    --zone-a:#7EA6DE; --zone-b:#58C4E3;
+    --flow-1:#FAAA4F; --flow-2:#A994F0; --flow-3:#64C7E3;
+    --ok:#9ACB68; --ok-soft:#22351A; --warn:#E7B64C; --warn-soft:#3A301C;
+    --open:#B3B6B8; --open-soft:#303030; --meter-bg:#333333;
+    --hero:#0E0E0E; --hero-ink:#FFFFFF; --hero-muted:#C6C6C6;
+  }
+
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-size:17px; line-height:1.62;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Noto Sans',Arial,sans-serif; }
+  a { color:var(--brand-deep); text-underline-offset:0.18em; }
+  a:hover { text-decoration-thickness:2px; }
+  a:focus-visible, button:focus-visible { outline:3px solid var(--flow-3); outline-offset:3px; }
+  .mono { font-family:ui-monospace,'Cascadia Mono',Menlo,Consolas,monospace; }
+  .shell { max-width:var(--max); margin:0 auto; padding-left:24px; padding-right:24px; }
+  .skip { position:absolute; left:-9999px; top:8px; z-index:1000; background:var(--surface);
+    color:var(--ink); padding:10px 14px; border:2px solid var(--flow-3); }
+  .skip:focus { left:8px; }
+  .eyebrow { margin:0 0 10px; font-size:0.75rem; font-weight:800; letter-spacing:0.14em;
+    text-transform:uppercase; }
+  h1, h2, h3 { line-height:1.14; letter-spacing:-0.025em; }
+  h1 { max-width:900px; margin:0; font-size:clamp(2.45rem,7vw,5.4rem); }
+  h2 { margin:0 0 16px; font-size:clamp(1.9rem,4vw,3rem); }
+  h3 { margin:0 0 10px; font-size:1.2rem; }
+  p { margin-top:0; }
+  .lede { max-width:820px; color:var(--ink2); font-size:clamp(1.08rem,2vw,1.28rem); }
+  .section { padding:78px 0; }
+  .section + .section { border-top:1px solid var(--line-soft); }
+  .section-head { max-width:860px; margin-bottom:34px; }
+
+  .hero { color:var(--hero-ink); background:var(--hero); border-top:6px solid var(--brand); }
+  .hero-top { display:flex; align-items:center; justify-content:space-between; gap:20px;
+    padding-top:20px; padding-bottom:20px; }
+  .wordmark { color:var(--hero-ink); text-decoration:none; font-size:0.82rem; font-weight:800;
+    letter-spacing:0.12em; text-transform:uppercase; }
+  .hero-nav { display:flex; align-items:center; flex-wrap:wrap; gap:10px 20px; }
+  .hero-nav a { color:var(--hero-muted); font-size:0.83rem; font-weight:700; text-decoration:none; }
+  .theme-btn { border:1px solid #666; color:var(--hero-ink); background:transparent; padding:7px 11px;
+    font:inherit; font-size:0.8rem; font-weight:750; cursor:pointer; }
+  .hero-copy { padding-top:78px; padding-bottom:72px; }
+  .hero .eyebrow { color:#FF8A80; }
+  .hero-sub { max-width:790px; margin:24px 0 0; color:var(--hero-muted);
+    font-size:clamp(1.12rem,2.3vw,1.42rem); }
+  .meta { display:flex; flex-wrap:wrap; gap:9px 22px; margin-top:32px; color:var(--hero-muted);
+    font-size:0.82rem; }
+  .status-row { display:flex; flex-wrap:wrap; gap:10px; margin-top:24px; }
+  .pill { display:inline-flex; align-items:center; gap:7px; border:1px solid #5A5A5A;
+    padding:6px 10px; font-size:0.76rem; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; }
+  .pill::before { content:""; width:8px; height:8px; background:var(--open); }
+  .pill.executed::before { background:#8CC152; }
+  .pill.open::before { background:#E0A83A; }
+
+  .notice { border-left:5px solid var(--brand); background:var(--brand-soft); padding:18px 20px;
+    color:var(--ink2); margin:0 0 38px; }
+  .notice strong { color:var(--ink); }
+  .timeline { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px;
+    background:var(--line); border:1px solid var(--line); margin:28px 0 44px; }
+  .time-card { background:var(--surface); padding:22px; min-height:190px; }
+  .date { color:var(--brand); font-size:1.35rem; font-weight:850; letter-spacing:-0.02em; }
+  .time-card p { color:var(--ink2); font-size:0.94rem; }
+  .source-tag { display:inline-block; margin-top:6px; color:var(--ink3); font-size:0.72rem;
+    font-weight:800; letter-spacing:0.08em; text-transform:uppercase; }
+  .claim-note { margin:13px 0 0; color:var(--ink3); font-size:0.78rem; }
+  .claim-note + .timeline, .claim-note + .quotes, .claim-note + .logical { margin-top:28px; }
+  .fact-tag { display:inline-block; margin-right:6px; border:1px solid currentColor; padding:2px 6px;
+    color:var(--zone-a); font-size:0.68rem; font-weight:850; letter-spacing:0.07em;
+    line-height:1.4; text-transform:uppercase; vertical-align:0.08em; }
+  .fact-tag.open { color:var(--warn); }
+  .fact-tag.official { color:var(--brand-deep); }
+  .quotes { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+  .quote-card { margin:0; background:var(--surface); border:1px solid var(--line-soft); padding:25px; }
+  .quote-card blockquote { margin:0 0 18px; font-size:1.15rem; line-height:1.46; font-weight:650; }
+  .quote-card blockquote::before { content:"“"; color:var(--brand); font-size:2rem; line-height:0; }
+  .quote-card cite { display:block; color:var(--ink3); font-size:0.8rem; font-style:normal; }
+  .quote-card .meaning { border-top:1px solid var(--line-soft); margin-top:18px; padding-top:16px;
+    color:var(--ink2); font-size:0.91rem; }
+
+  .meaning-grid, .benefit-grid, .evidence-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+  .plain-card { background:var(--surface); border-top:4px solid var(--zone-a); padding:24px; }
+  .plain-card p { color:var(--ink2); font-size:0.95rem; margin-bottom:0; }
+  .benefit-grid .plain-card:nth-child(2) { border-color:var(--flow-2); }
+  .benefit-grid .plain-card:nth-child(3) { border-color:var(--flow-3); }
+  .benefit-grid .plain-card:nth-child(4) { border-color:var(--ok); }
+  .benefit-grid { grid-template-columns:repeat(4,minmax(0,1fr)); }
+
+  .logical { display:grid; gap:10px; margin:32px 0 48px; }
+  .tier { display:grid; grid-template-columns:180px 1fr; background:var(--surface);
+    border:1px solid var(--line-soft); }
+  .tier-label { background:var(--band); padding:20px; font-size:0.76rem; font-weight:850;
+    letter-spacing:0.1em; text-transform:uppercase; }
+  .tier-items { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px;
+    background:var(--line-soft); }
+  .tier-item { background:var(--surface); padding:17px 18px; }
+  .tier-item strong { display:block; font-size:0.94rem; }
+  .tier-item span { color:var(--ink3); font-size:0.78rem; }
+
+  .player { background:var(--surface); border:1px solid var(--line-soft); }
+  .player-head { padding:18px 20px; border-bottom:1px solid var(--line-soft); }
+  .player-head h3 { margin-bottom:4px; }
+  .player-head p { color:var(--ink3); font-size:0.86rem; margin:0; }
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:12px 16px;
+    border-bottom:1px solid var(--line-soft); }
+  .controls button { font:inherit; font-weight:750; font-size:0.82rem; background:var(--surface);
+    color:var(--ink); border:1px solid var(--line); padding:7px 14px; cursor:pointer; border-radius:2px; }
+  .controls button:hover { border-color:var(--ink2); }
+  .stepnum { font-size:0.8rem; color:var(--ink3); min-width:92px; text-align:center;
+    font-variant-numeric:tabular-nums; }
+  .dots { display:flex; flex-wrap:wrap; gap:6px; padding:10px 16px; }
+  .dots button { width:28px; height:8px; padding:0; border:none; background:var(--line-soft);
+    cursor:pointer; border-radius:1px; }
+  .dots button[aria-current="true"] { background:var(--flow-2); }
+  .stagewrap { overflow-x:auto; background:var(--bg); }
+  .stagewrap svg { display:block; min-width:1120px; width:100%; height:auto; }
+  svg text { font-family:inherit; fill:var(--ink); }
+  .zone { fill:var(--zone); stroke:var(--zone-a); stroke-width:2; }
+  .subz { fill:var(--subzone); stroke:var(--zone-b); stroke-width:1.6; }
+  .zlabel { font-size:11.5px; font-weight:800; letter-spacing:0.09em; fill:var(--ink2); }
+  .zsub { font-size:10.5px; fill:var(--ink3); }
+  .node { fill:var(--surface); stroke:var(--line); stroke-width:1.2; transition:stroke 0.3s,opacity 0.3s; }
+  .frame { fill:none; stroke:var(--line); stroke-width:1.2; stroke-dasharray:5 4; transition:stroke 0.3s; }
+  .planned { stroke:var(--open); stroke-dasharray:6 5; }
+  .ntitle { font-size:12.5px; font-weight:800; }
+  .nsub { font-size:10.8px; fill:var(--ink2); }
+  .nport { font-size:10.3px; fill:var(--ink3); }
+  .counter { font-size:12.5px; font-weight:750; font-variant-numeric:tabular-nums; }
+  .flow { fill:none; stroke-width:3; stroke-linejoin:round; opacity:0.14; transition:opacity 0.3s; }
+  .flow.on { opacity:1; }
+  .flow.p1 { stroke:var(--flow-1); }
+  .flow.p2 { stroke:var(--flow-2); }
+  .flow.p3 { stroke:var(--flow-3); }
+  .flow.planned-flow { stroke:var(--open); stroke-dasharray:6 5; opacity:0.5; }
+  .flabel { font-size:10.6px; }
+  .flabel.p1 { fill:var(--flow-1); } .flabel.p2 { fill:var(--flow-2); }
+  .flabel.p3 { fill:var(--flow-3); } .flabel.open { fill:var(--open); }
+  .hot rect.node, rect.node.hot, .hot rect.frame { stroke:var(--flow-2); stroke-width:2.6; }
+  .ghost { opacity:0; transition:opacity 0.4s; }
+  .ghost.shown { opacity:1; }
+  .anim-dot.p1 { fill:var(--flow-1); } .anim-dot.p2 { fill:var(--flow-2); }
+  .anim-dot.p3 { fill:var(--flow-3); }
+  .caption { padding:18px 22px 22px; border-top:1px solid var(--line-soft); min-height:118px; }
+  .caption .ct { font-weight:800; font-size:1.05rem; margin:0 0 6px; }
+  .caption .cb { font-size:0.9rem; color:var(--ink2); margin:0; max-width:100ch; }
+  .legendband { background:var(--band); border-top:1px solid var(--line-soft); display:flex;
+    flex-wrap:wrap; gap:10px 26px; padding:12px 18px; font-size:0.78rem; color:var(--ink2); }
+  .legendband .sw { display:inline-block; width:26px; height:10px; margin-right:8px; vertical-align:middle; }
+  .legendband .dash { background:transparent; border:2px dashed var(--open); }
+
+  .metric { background:var(--surface); border:1px solid var(--line-soft); padding:23px; }
+  .metric strong { display:block; color:var(--brand); font-size:clamp(1.9rem,4vw,3rem);
+    line-height:1; letter-spacing:-0.04em; }
+  .metric span { display:block; margin-top:10px; color:var(--ink2); font-size:0.9rem; }
+  .evidence-grid { grid-template-columns:repeat(4,minmax(0,1fr)); margin:28px 0; }
+  .tablewrap { overflow-x:auto; border:1px solid var(--line-soft); background:var(--surface); }
+  table { width:100%; border-collapse:collapse; min-width:720px; }
+  th, td { text-align:left; border-bottom:1px solid var(--line-soft); padding:13px 15px; }
+  th { background:var(--band); font-size:0.76rem; letter-spacing:0.06em; text-transform:uppercase; }
+  td { font-size:0.9rem; }
+  .result-note { color:var(--ink3); font-size:0.8rem; margin-top:12px; }
+  .lesson { display:grid; grid-template-columns:minmax(220px,0.7fr) minmax(0,1.3fr); gap:28px;
+    margin-top:42px; padding:30px; background:var(--warn-soft); border-left:5px solid var(--warn); }
+  .lesson p { color:var(--ink2); margin-bottom:0; }
+
+  .boundary-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  .boundary { background:var(--surface); border:1px solid var(--line-soft); padding:26px; }
+  .boundary.good { border-top:5px solid var(--ok); }
+  .boundary.open { border-top:5px solid var(--warn); }
+  .boundary ul { padding-left:1.2em; margin-bottom:0; }
+  .boundary li + li { margin-top:9px; }
+  .source-list { padding-left:1.3em; }
+  .source-list li + li { margin-top:13px; }
+  .source-list span { color:var(--ink3); font-size:0.85rem; }
+  .repo-callout { display:flex; justify-content:space-between; align-items:center; gap:20px;
+    background:var(--hero); color:var(--hero-ink); padding:28px; margin-top:34px; }
+  .repo-callout p { color:var(--hero-muted); margin:4px 0 0; }
+  .repo-callout a { flex:none; color:#FFF; border:1px solid #777; padding:10px 15px; text-decoration:none;
+    font-size:0.86rem; font-weight:800; }
+  footer { background:var(--band); border-top:1px solid var(--line-soft); padding:28px 0;
+    color:var(--ink3); font-size:0.8rem; }
+  .footer-row { display:flex; justify-content:space-between; gap:24px; }
+
+  @media (max-width:900px) {
+    .timeline, .meaning-grid, .benefit-grid, .evidence-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .tier { grid-template-columns:1fr; }
+    .tier-items { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .lesson { grid-template-columns:1fr; }
+  }
+  @media (max-width:650px) {
+    body { font-size:16px; }
+    .shell { padding-left:17px; padding-right:17px; }
+    .hero-top { align-items:flex-start; }
+    .hero-nav a { display:none; }
+    .hero-copy { padding-top:52px; padding-bottom:54px; }
+    .section { padding:56px 0; }
+    .timeline, .quotes, .meaning-grid, .benefit-grid, .evidence-grid, .boundary-grid { grid-template-columns:1fr; }
+    .tier-items { grid-template-columns:1fr; }
+    .repo-callout, .footer-row { align-items:flex-start; flex-direction:column; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior:auto; }
+    .flow, .ghost, .node, .frame { transition:none; }
+  }
+  @media print {
+    :root { --bg:#FFF; --surface:#FFF; --ink:#000; --ink2:#222; --ink3:#444; --line:#AAA; --line-soft:#CCC; }
+    .hero { background:#FFF; color:#000; border-bottom:2px solid #000; }
+    .hero-sub, .meta, .hero-nav a { color:#222; }
+    .theme-btn, .controls, .dots { display:none; }
+    .section { break-inside:avoid; }
+    .stagewrap { overflow:visible; }
+  }
+</style>
+</head>
+<body id="top">
+<a class="skip" href="#main">Skip to article</a>
+
+<header class="hero">
+  <div class="shell hero-top">
+    <a class="wordmark" href="#top">vLLM watermarking research</a>
+    <nav class="hero-nav" aria-label="Article sections">
+      <a href="#eu-change">EU change</a>
+      <a href="#solution">Solution</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#boundaries">Boundaries</a>
+      <button class="theme-btn" id="btn-theme" type="button" aria-label="Toggle colour theme">Theme</button>
+    </nav>
+  </div>
+  <div class="shell hero-copy">
+    <p class="eyebrow">Article 50 engineering research · evidence snapshot 9 August 2026</p>
+    <h1>Mark, detect, repeat.</h1>
+    <p class="hero-sub">What Europe’s AI transparency rules say about machine-readable marking, and what we learned building decode-time text watermarking with vLLM on OpenShift AI.</p>
+    <div class="meta">
+      <span>vLLM 0.18.0</span>
+      <span>RHOAI 3.4.2</span>
+      <span>KGW + SynthID-Text</span>
+      <span>Single-file animated architecture</span>
+    </div>
+      <div class="status-row" aria-label="Project status">
+      <span class="pill executed">EXECUTED · internal PoC path</span>
+      <span class="pill open">OPEN · production boundaries</span>
+      </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="section" id="eu-change">
+    <div class="shell">
+      <div class="section-head">
+        <p class="eyebrow">What is changing in the EU</p>
+        <h2>For generated text, marking and detection now belong in the same conversation.</h2>
+        <p class="lede">Article 50(2) expressly joins “marked in a machine-readable format” with “detectable as artificially generated or manipulated.” The Code and Commission Guidelines add text-specific detail. The quotations below are exact excerpts; the engineering explanation is deliberately narrower than a legal conclusion.</p>
+      </div>
+
+      <aside class="notice">
+        <strong>Scope first.</strong> This is an evidence-tracked engineering proof of concept—not legal advice, a Red Hat product feature, a support statement, or proof of EU AI Act compliance. Application to a particular internal-only deployment remains a question for counsel.
+      </aside>
+
+      <div class="timeline" aria-label="Relevant EU dates">
+        <article class="time-card">
+          <div class="date">2 Aug 2026</div>
+          <h3>Application date</h3>
+          <p>Article 113 says: “It shall apply from 2 August 2026.”</p>
+          <span class="source-tag">OJ-VERBATIM · Article 113 · <a href="#source-law">source</a></span>
+        </article>
+        <article class="time-card">
+          <div class="date">2 Dec 2026</div>
+          <h3>Express transition text</h3>
+          <p>Article 111(4) says covered providers “shall take the necessary steps in order to comply with Article 50(2) by 2 December 2026.”</p>
+          <span class="source-tag">OJ-VERBATIM · Article 111(4) · <a href="#source-transition">source</a></span>
+        </article>
+        <article class="time-card">
+          <div class="date">2 Feb 2027</div>
+          <h3>Code interoperability date</h3>
+          <p>Measure 3.4 says: “Signatories will implement an interoperability solution for their detection mechanisms by 2 February 2027”.</p>
+          <span class="source-tag">OJ-VERBATIM · voluntary Code · <a href="#source-code">source</a></span>
+        </article>
+      </div>
+
+      <div class="quotes">
+        <figure class="quote-card">
+          <blockquote>shall ensure that the outputs of the AI system are marked in a machine-readable format and detectable as artificially generated or manipulated.</blockquote>
+          <cite><span class="fact-tag official">OJ-VERBATIM</span> Regulation (EU) 2024/1689, Article 50(2) · <a href="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689">official source</a></cite>
+          <p class="meaning"><span class="fact-tag">STATIC</span> <strong>Engineering reading:</strong> generation-side marking alone is incomplete; a detector and an operating path for it matter too. The full paragraph contains qualifications that this excerpt does not replace. <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">Fact A1 and scope register</a>.</p>
+        </figure>
+        <figure class="quote-card">
+          <blockquote>For free-form text longer than 200 tokens, watermarking still needs to be applied, even though it may have lower reliability compared to that of watermarking very long text.</blockquote>
+          <cite><span class="fact-tag official">OJ-VERBATIM</span> Voluntary Code of Practice, Sub-measure 1.1.2 · <a href="https://ec.europa.eu/newsroom/dae/redirection/document/129555">official PDF</a></cite>
+          <p class="meaning"><span class="fact-tag">STATIC</span> <strong>Important distinction:</strong> 200 tokens is Code language, not wording from Article 50 itself, and it is not a universal technical reliability threshold. <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">Fact A7 and scope register</a>.</p>
+        </figure>
+        <figure class="quote-card">
+          <blockquote>Fulfilling only one element (e.g. for machine-readable marking of outputs without the means for their detection being available) will not suffice to comply with that provision.</blockquote>
+          <cite><span class="fact-tag official">OJ-VERBATIM</span> Commission Guidelines on Article 50, paragraph 70 · <a href="https://ec.europa.eu/newsroom/dae/redirection/document/131215">official PDF</a></cite>
+          <p class="meaning"><span class="fact-tag">STATIC</span> <strong>Engineering reading:</strong> a visible badge, a generator-only feature, or a detector that cannot be operated is not the complete technical story. Deployment-specific access remains for counsel and policy owners. <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">Fact A9 and scope register</a>.</p>
+        </figure>
+        <figure class="quote-card">
+          <blockquote>Providers of AI systems, including general-purpose AI systems, generating synthetic audio, image, video or text content, that have been placed on the market before 2 August 2026 shall take the necessary steps in order to comply with Article 50(2) by 2 December 2026.</blockquote>
+          <cite><span class="fact-tag official">OJ-VERBATIM</span> Regulation (EU) 2026/1744, Article 111(4) · <a href="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32026R1744">official source</a></cite>
+          <p class="meaning"><span class="fact-tag open">OPEN</span> <strong>Scope caution:</strong> the quoted provision says “placed on the market.” Applying that wording to an internal-only system is expressly left open in this project for counsel. <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">Fact A3 and scope register</a>.</p>
+        </figure>
+      </div>
+
+      <div class="meaning-grid" style="margin-top:34px">
+        <article class="plain-card">
+          <h3>The mark must travel</h3>
+          <p>A UI badge or JSON field disappears when somebody copies free-form text. Decode-time watermarking puts a keyed statistical signal into token choices, so the signal can travel with the text—subject to robustness limits.</p>
+        </article>
+        <article class="plain-card">
+          <h3>Detection is a system</h3>
+          <p>The detector needs the same tokenizer, scheme, configuration and key. It also needs authentication, failure policy, correlation, observability and a defined way to expose results.</p>
+        </article>
+        <article class="plain-card">
+          <h3>Evidence must stay scoped</h3>
+          <p>A positive result is not proof of truth, safety, copyright, authorship or human identity. A negative result is not proof that a human wrote the text.</p>
+        </article>
+      </div>
+      <p class="claim-note"><span class="fact-tag">STATIC</span> Engineering interpretation and limitations: <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/technical.md">technical design</a> and <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">facts A1, A7 and A9</a>.</p>
+    </div>
+  </section>
+
+  <section class="section" id="solution">
+    <div class="shell">
+      <div class="section-head">
+        <p class="eyebrow">How the solution can help</p>
+        <h2>Mark at generation time, verify independently, and keep checking.</h2>
+        <p class="lede">The implementation adds two keyed watermark processors to vLLM’s V1 decoding path, keeps detection in a separate CPU service, and places a sampling gateway in front of the internal RHOAI predictor. That creates an evidence loop instead of a one-off demo.</p>
+        <p class="claim-note"><span class="fact-tag">EXECUTED</span> <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">Facts D1, D5, D8 and D10</a> · <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09">current fixed-matrix evidence</a>.</p>
+      </div>
+
+      <div class="benefit-grid">
+        <article class="plain-card">
+          <h3>Decode-time marking</h3>
+          <p>KGW and SynthID-Text adjust token selection after model logits are produced and before sampling. Model weights and checkpoints remain unchanged.</p>
+        </article>
+        <article class="plain-card">
+          <h3>Independent verification</h3>
+          <p>A separate detector scores plain text using the matching scheme and server-held key, without requiring a running vLLM engine or GPU.</p>
+        </article>
+        <article class="plain-card">
+          <h3>Continuous validation</h3>
+          <p><span class="mono">N=1</span> validates every completed response; <span class="mono">N=5</span> validates ordinals 5, 10, 15 and so on at one persistent sampler.</p>
+        </article>
+        <article class="plain-card">
+          <h3>Auditable evidence</h3>
+          <p>Selected records retain IDs, SHA-256 digests, scheme, non-secret key ID, verdict, attempts and timings—not prompt or response text.</p>
+        </article>
+      </div>
+
+      <div class="lesson">
+        <div>
+          <p class="eyebrow">The lesson that shaped the workflow</p>
+          <h3>The first result looked excellent. It was wrong.</h3>
+        </div>
+        <p><span class="fact-tag">EXECUTED</span> The wheel registered KGW as an entry point while the server also loaded the same class explicitly. vLLM 0.18.0 instantiated both copies, roughly doubling the intended bias. The project marked the first figures as superseded, removed the duplicate loading path, regenerated the corpora and reran the measurements. “The code ran” was not enough; exact loading and raw evidence mattered. <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/EXPERIMENTS.md#2026-08-08--correction-phase-1-ran-two-kgw-processor-instances-effective-delta-40">Correction record</a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="architecture">
+    <div class="shell">
+      <div class="section-head">
+        <p class="eyebrow">Animated reference architecture</p>
+        <h2>One selected response, from generation to correlated verdict.</h2>
+        <p class="lede">This is the executed cluster-internal path. The storyboard follows ordinal 5 under <span class="mono">N=5</span>. The external KServe/Istio entry is shown dashed because that pass-through remains open.</p>
+        <p class="claim-note"><span class="fact-tag">EXECUTED</span> Internal path: <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">facts C8 and D10</a>. <span class="fact-tag open">OPEN</span> External pass-through and production boundaries: <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">facts C8 and D10</a>.</p>
+      </div>
+
+      <div class="logical" aria-label="Logical architecture layers">
+        <div class="tier">
+          <div class="tier-label">Client layer</div>
+          <div class="tier-items">
+            <div class="tier-item"><strong>Application caller</strong><span>OpenAI-compatible request</span></div>
+            <div class="tier-item"><strong>Gateway contract</strong><span>non-streaming · one choice</span></div>
+            <div class="tier-item"><strong>Request metadata</strong><span>scheme + non-secret key ID</span></div>
+            <div class="tier-item"><strong>External route</strong><span>OPEN · not in executed flow</span></div>
+          </div>
+        </div>
+        <div class="tier">
+          <div class="tier-label">Generation layer</div>
+          <div class="tier-items">
+            <div class="tier-item"><strong>RHOAI InferenceService</strong><span>internal predictor · port 8080</span></div>
+            <div class="tier-item"><strong>vLLM 0.18.0</strong><span>V1 logits-processor API</span></div>
+            <div class="tier-item"><strong>KGW + SynthID</strong><span>entry points · per-request scheme</span></div>
+            <div class="tier-item"><strong>Mounted Secret</strong><span>key never enters request body</span></div>
+          </div>
+        </div>
+        <div class="tier">
+          <div class="tier-label">Validation layer</div>
+          <div class="tier-items">
+            <div class="tier-item"><strong>Persistent sampler</strong><span>SQLite · one replica</span></div>
+            <div class="tier-item"><strong>Managed NeMo</strong><span>bounded correlation metadata</span></div>
+            <div class="tier-item"><strong>Authenticated broker</strong><span>resolves held exact response</span></div>
+            <div class="tier-item"><strong>Detector</strong><span>KGW or SynthID · port 8000</span></div>
+          </div>
+        </div>
+        <div class="tier">
+          <div class="tier-label">Evidence layer</div>
+          <div class="tier-items">
+            <div class="tier-item"><strong>Hash-only records</strong><span>one record per selected response</span></div>
+            <div class="tier-item"><strong>Bounded metrics</strong><span>no digest, key or content labels</span></div>
+            <div class="tier-item"><strong>Failure policy</strong><span>synchronous · fail closed</span></div>
+            <div class="tier-item"><strong>Delivery policy</strong><span>positive flag distinct from NeMo block</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="player">
+        <div class="player-head">
+          <h3>Storyboard: selected ordinal 5</h3>
+          <p>Use Previous/Next, autoplay, the step markers, left/right arrow keys, or a deep link such as <span class="mono">#step-6</span>.</p>
+        </div>
+        <div class="controls">
+          <button id="btn-prev" type="button" aria-label="Previous step">◀ Previous</button>
+          <button id="btn-next" type="button" aria-label="Next step">Next ▶</button>
+          <button id="btn-play" type="button" aria-pressed="false" aria-label="Autoplay">▶ Play</button>
+          <button id="btn-link" type="button" aria-label="Copy a direct link to this step">Copy step link</button>
+          <span class="stepnum" id="stepnum">Step 1 / 9</span>
+        </div>
+        <div class="dots" id="stepdots" role="group" aria-label="Architecture steps"></div>
+
+        <div class="stagewrap">
+          <svg id="stage" viewBox="0 0 1400 740" role="img" aria-labelledby="stage-title stage-desc">
+            <title id="stage-title">Continuous watermark validation architecture</title>
+            <desc id="stage-desc">A caller sends a request to a cluster-internal validation gateway. The gateway calls a RHOAI vLLM predictor, samples completed responses, invokes managed NeMo with correlation metadata, receives an authenticated broker action, resolves the exact pending response, calls a watermark detector, and writes hash-only evidence.</desc>
+
+            <g id="b-external">
+              <rect class="node planned" x="20" y="100" width="150" height="86"></rect>
+              <text class="ntitle" x="31" y="124">External gateway</text>
+              <text class="nsub" x="31" y="142">KServe / Istio</text>
+              <text class="nport mono" x="31" y="160">OPEN · not executed</text>
+            </g>
+            <g id="b-client">
+              <rect class="node" x="20" y="300" width="150" height="90"></rect>
+              <text class="ntitle" x="31" y="325">Application caller</text>
+              <text class="nsub" x="31" y="344">non-streaming · n=1</text>
+              <text class="nport mono" x="31" y="364">OpenAI-compatible</text>
+            </g>
+
+            <rect class="zone" x="210" y="50" width="1160" height="650"></rect>
+            <text class="zlabel" x="225" y="73">OPENSHIFT AI CLUSTER — EXECUTED INTERNAL PATH</text>
+            <text class="zsub" x="225" y="89">RHOAI 3.4.2 · single replica · synchronous · non-streaming</text>
+
+            <rect class="subz" x="240" y="105" width="460" height="335"></rect>
+            <text class="zlabel" x="253" y="126" style="font-size:10.5px">SERVING &amp; GENERATION</text>
+
+            <g id="b-gateway">
+              <rect class="node" x="270" y="200" width="180" height="110"></rect>
+              <text class="ntitle" x="282" y="224">Validation gateway</text>
+              <text class="nsub" x="282" y="242">holds selected response</text>
+              <text class="nport mono" x="282" y="260">HTTP :8080 · sync</text>
+              <text class="nsub" x="282" y="279">outcome: <tspan id="c-outcome">waiting</tspan></text>
+              <text class="nsub" x="282" y="296">mode: synchronous</text>
+            </g>
+            <g id="b-predictor">
+              <rect class="node" x="490" y="200" width="180" height="110"></rect>
+              <text class="ntitle" x="502" y="224">RHOAI predictor</text>
+              <text class="nsub" x="502" y="242">vLLM 0.18.0</text>
+              <text class="nport mono" x="502" y="260">HTTP :8080</text>
+              <text class="nsub" x="502" y="279">KGW + SynthID plugins</text>
+              <text class="nsub" x="502" y="296">one GPU</text>
+            </g>
+            <g id="b-secret">
+              <rect class="node" x="490" y="340" width="180" height="70"></rect>
+              <text class="ntitle" x="502" y="364">Watermark Secret</text>
+              <text class="nsub" x="502" y="382">key stays server-side</text>
+              <text class="nport mono" x="502" y="399">key_id is non-secret</text>
+            </g>
+
+            <rect class="subz" x="730" y="105" width="610" height="335"></rect>
+            <text class="zlabel" x="743" y="126" style="font-size:10.5px">MANAGED VALIDATION</text>
+
+            <g id="b-nemo">
+              <rect class="node" x="760" y="180" width="170" height="100"></rect>
+              <text class="ntitle" x="772" y="204">Managed NeMo</text>
+              <text class="nsub" x="772" y="222">RHOAI-shipped 0.21.0</text>
+              <text class="nport mono" x="772" y="240">/v1/guardrail/checks</text>
+              <text class="nsub" x="772" y="258">blocked / success</text>
+            </g>
+            <g id="b-broker">
+              <rect class="node" x="970" y="180" width="170" height="100"></rect>
+              <text class="ntitle" x="982" y="204">Metadata broker</text>
+              <text class="nsub" x="982" y="222">authenticated action</text>
+              <text class="nport mono" x="982" y="240">validation_id + digest</text>
+              <text class="nsub" x="982" y="258">attempts: <tspan id="c-attempts">0</tspan> / 3</text>
+            </g>
+            <g id="b-detector">
+              <rect class="node" x="1170" y="180" width="140" height="100"></rect>
+              <text class="ntitle" x="1181" y="204">Detector</text>
+              <text class="nsub" x="1181" y="222">KGW or SynthID</text>
+              <text class="nport mono" x="1181" y="240">HTTP :8000</text>
+              <text class="nsub" x="1181" y="258">exact held text</text>
+            </g>
+            <g id="b-pending">
+              <rect class="node" x="760" y="320" width="170" height="80"></rect>
+              <text class="ntitle" x="772" y="344">Pending response</text>
+              <text class="nsub" x="772" y="362">in gateway memory</text>
+              <text class="nport mono" x="772" y="380">queue: <tspan id="c-queue">0</tspan></text>
+            </g>
+
+            <rect class="subz" x="240" y="470" width="1100" height="185"></rect>
+            <text class="zlabel" x="253" y="491" style="font-size:10.5px">STATE, EVIDENCE &amp; OPEN PRODUCTION BOUNDARIES</text>
+
+            <g id="b-sampler">
+              <rect class="node" x="270" y="520" width="180" height="100"></rect>
+              <text class="ntitle" x="282" y="544">SQLite sampler</text>
+              <text class="nsub" x="282" y="562">RWO · replicas=1</text>
+              <text class="counter" x="282" y="582">ordinal: <tspan id="c-ordinal">4</tspan></text>
+              <text class="nport mono" x="282" y="602">N=5 · selected: <tspan id="c-selected">0</tspan></text>
+            </g>
+            <g id="b-records">
+              <rect class="node" x="490" y="520" width="180" height="100"></rect>
+              <text class="ntitle" x="502" y="544">Hash-only records</text>
+              <text class="nsub" x="502" y="562">ID · digest · verdict</text>
+              <text class="nsub" x="502" y="580">attempts · mode · timing</text>
+              <text class="nport mono" x="502" y="600">plaintext: never stored</text>
+            </g>
+            <g id="b-metrics">
+              <rect class="node" x="710" y="520" width="180" height="100"></rect>
+              <text class="ntitle" x="722" y="544">Metrics &amp; events</text>
+              <text class="nsub" x="722" y="562">bounded labels</text>
+              <text class="nsub" x="722" y="580">latency · retry · queue</text>
+              <text class="nport mono" x="722" y="600">GET /metrics :8080</text>
+            </g>
+            <g id="b-open">
+              <rect class="frame planned" x="970" y="510" width="340" height="120"></rect>
+              <text class="ntitle" x="984" y="536">Production boundaries · OPEN</text>
+              <text class="nsub" x="984" y="557">external route · caller auth · mTLS</text>
+              <text class="nsub" x="984" y="576">HA · multi-replica ordinals · streaming</text>
+              <text class="nsub" x="984" y="595">key lifecycle · platform retention</text>
+              <text class="nport mono" x="984" y="614">supportability requires confirmation</text>
+            </g>
+
+            <path class="flow p2 planned-flow" id="f-external" d="M170,143 H218 V215 H270"></path>
+            <text class="flabel open" x="178" y="135">external pass-through · OPEN</text>
+            <path class="flow p1" id="f-request" d="M170,335 H215 V240 H270"></path>
+            <text class="flabel p1" x="177" y="327">request</text>
+            <path class="flow p1" id="f-delivery" d="M270,270 H225 V365 H170"></path>
+            <text class="flabel p1" x="177" y="384">delivery / content-free error</text>
+            <path class="flow p1" id="f-generate" d="M450,225 H490"></path>
+            <text class="flabel p1" x="444" y="190">generate</text>
+            <path class="flow p1" id="f-completion" d="M490,275 H450"></path>
+            <text class="flabel p1" x="441" y="327">completion</text>
+            <path class="flow p2" id="f-key" d="M580,340 V310"></path>
+            <text class="flabel p2" x="590" y="330">mounted key</text>
+            <path class="flow p2" id="f-claim" d="M310,310 V495 H360 V520"></path>
+            <text class="flabel p2" x="318" y="476">atomic ordinal claim</text>
+            <path class="flow p1" id="f-pending" d="M360,310 V430 H845 V400"></path>
+            <text class="flabel p1" x="575" y="422">selected response held</text>
+            <path class="flow p2" id="f-nemo" d="M360,200 V150 H845 V180"></path>
+            <text class="flabel p2" x="568" y="142">verified TLS · exact response + bounded context</text>
+            <path class="flow p2" id="f-action" d="M930,210 H970"></path>
+            <text class="flabel p2" x="919" y="169">metadata only</text>
+            <path class="flow p1" id="f-resolve" d="M845,320 V300 H1055 V280"></path>
+            <text class="flabel p1" x="866" y="294">resolve exact pending response</text>
+            <path class="flow p2" id="f-detect" d="M1140,210 H1170"></path>
+            <text class="flabel p2" x="1138" y="169">detect</text>
+            <path class="flow p2" id="f-detector-result" d="M1170,250 H1140"></path>
+            <text class="flabel p2" x="1138" y="298">verdict</text>
+            <path class="flow p2" id="f-verdict" d="M970,250 H930"></path>
+            <text class="flabel p2" x="930" y="298">boolean</text>
+            <path class="flow p2" id="f-managed-result" d="M760,260 H720 V170 H410 V200"></path>
+            <text class="flabel p2" x="514" y="163">blocked / success</text>
+            <path class="flow p3" id="f-record" d="M410,310 V485 H580 V520"></path>
+            <text class="flabel p3" x="430" y="478">hash-only terminal record</text>
+            <path class="flow p3" id="f-metrics" d="M430,310 V475 H800 V520"></path>
+            <text class="flabel p3" x="650" y="468">bounded metrics + redacted events</text>
+          </svg>
+        </div>
+
+        <div class="caption" aria-live="polite">
+          <p class="ct" id="cap-title"></p>
+          <p class="cb" id="cap-body"></p>
+        </div>
+        <div class="legendband">
+          <span><span class="sw" style="background:var(--flow-1)"></span>Request &amp; generated-text data</span>
+          <span><span class="sw" style="background:var(--flow-2)"></span>Validation &amp; control</span>
+          <span><span class="sw" style="background:var(--flow-3)"></span>Evidence &amp; observability</span>
+          <span><span class="sw dash"></span>OPEN / not in executed path</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="evidence">
+    <div class="shell">
+      <div class="section-head">
+        <p class="eyebrow">What the evidence supports</p>
+        <h2>A strong proof of concept, bounded to one measured stack.</h2>
+        <p class="lede">The environment was upstream vLLM 0.18.0, Qwen2.5-0.5B-Instruct, one NVIDIA A10G, one key/configuration and defined corpora. These are observed results, not universal error rates.</p>
+        <p class="claim-note"><span class="fact-tag">EXECUTED</span> <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/EXPERIMENTS.md#2026-08-08--phase-1-corrected--phase-2-synthid-through-vllm-serve-closes-d8">corrected generation and detection corpus</a> · <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09">current D10 matrix</a>.</p>
+      </div>
+
+      <div class="evidence-grid">
+        <div class="metric"><strong>20 / 20</strong><span>completed responses selected at <span class="mono">N=1</span></span></div>
+        <div class="metric"><strong>20 / 100</strong><span>ordinals 5, 10, …, 100 selected at <span class="mono">N=5</span></span></div>
+        <div class="metric"><strong>40 / 40</strong><span>selected hash-only records carrying <span class="mono">mode=synchronous</span></span></div>
+        <div class="metric"><strong>288</strong><span>tests passed at the last cluster-validated revision</span></div>
+      </div>
+
+      <h3>Detection at 200 scored tokens</h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Scheme</th><th>Watermarked detected</th><th>Unwatermarked false positives</th><th>Human-text false positives</th></tr></thead>
+          <tbody>
+            <tr><td>KGW · delta 2.0</td><td>119 / 120 observed</td><td>0 / 119 observed</td><td>0 / 150 observed</td></tr>
+            <tr><td>SynthID · depth 30</td><td>120 / 120 observed</td><td>0 / 119 observed</td><td>0 / 150 observed</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="result-note">At 256 tokens, every completion long enough to score was detected in the recorded KGW and SynthID corpora. “Zero observed” is not a universal zero-error claim.</p>
+
+      <h3 style="margin-top:36px">Matched serving performance</h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Configuration</th><th>Aggregate output tokens/s</th><th>p50 latency</th><th>Interpretation</th></tr></thead>
+          <tbody>
+            <tr><td>No plugin</td><td>904.35</td><td>1.117 s</td><td>Phase 0 baseline</td></tr>
+            <tr><td>Processors loaded, watermark off</td><td>913.78</td><td>1.115 s</td><td>No measured penalty in this run</td></tr>
+            <tr><td>KGW on</td><td>643.38</td><td>1.576 s</td><td>Baseline throughput was 1.41× KGW</td></tr>
+            <tr><td>SynthID on</td><td>287.82</td><td>3.563 s</td><td>Baseline throughput was 3.14× SynthID</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="result-note">One small model, concurrency 4, 256 output tokens and the recorded A10G configuration. Realistic batches, larger models and optimisation remain open.</p>
+    </div>
+  </section>
+
+  <section class="section" id="boundaries">
+    <div class="shell">
+      <div class="section-head">
+        <p class="eyebrow">Where the claim stops</p>
+        <h2>The internal path worked. That is not the same as a production solution.</h2>
+        <p class="claim-note"><span class="fact-tag">EXECUTED</span> Demonstrated scope. <span class="fact-tag open">OPEN</span> Production boundaries. Source: <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">facts C8, D5 and D10</a>.</p>
+      </div>
+
+      <div class="boundary-grid">
+        <article class="boundary good">
+          <h3>What this implementation demonstrates</h3>
+          <ul>
+            <li>KGW and SynthID-Text generation through <span class="mono">vllm serve</span>.</li>
+            <li>Independent detection with matching scheme and server-held key.</li>
+            <li>Per-request enablement, scheme and non-secret key-ID controls.</li>
+            <li>RHOAI ServingRuntime, InferenceService and internal predictor execution.</li>
+            <li>Managed-NeMo metadata correlation through an authenticated broker.</li>
+            <li>Strict one-in-<span class="mono">N</span> synchronous validation with bounded retry and fail-closed behavior.</li>
+            <li>Hash-only records, bounded metric labels and finite leak scans.</li>
+          </ul>
+        </article>
+        <article class="boundary open">
+          <h3>What remains open</h3>
+          <ul>
+            <li>External KServe/Istio pass-through and an authenticated public entry point.</li>
+            <li>NetworkPolicy, mTLS, caller authorisation, HA and PDB policy.</li>
+            <li>Multi-replica/global ordinals, restarts, rollouts, streaming and asynchronous delivery.</li>
+            <li>Platform-wide retention guarantees and full data-flow threat modelling.</li>
+            <li>Key creation, rotation, application scoping and compromise response.</li>
+            <li>Paraphrase, translation, multilingual, code and structured-output robustness.</li>
+            <li>Larger models, realistic batches, tensor parallelism, quality evaluation and production performance.</li>
+            <li>Red Hat supportability and deployment-specific legal conclusions.</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="repo-callout">
+        <div>
+          <strong>Inspect the evidence, not just the diagram.</strong>
+          <p>The repository keeps a fact register, exact legal quotations, phased acceptance criteria and an append-only execution log.</p>
+        </div>
+        <a href="https://github.com/naeemarsalan/vllm-watermark">Open the repository</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="sources">
+    <div class="shell">
+      <div class="section-head">
+        <p class="eyebrow">Sources and verification</p>
+        <h2>Trace every important claim.</h2>
+        <p class="lede">Legal quotations link to official texts. Engineering figures link to the local fact and experiment registers when this page is viewed inside the repository.</p>
+      </div>
+      <ol class="source-list">
+        <li id="source-law"><a href="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689">Regulation (EU) 2024/1689</a> and the repository’s <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/quotes.md#art-50-2">Article 50(2) quote register</a>. <span>Exact official text.</span></li>
+        <li id="source-transition"><a href="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32026R1744">Regulation (EU) 2026/1744</a> and the <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/quotes.md#art-111-4">Article 111(4) extract</a>. <span>Exact official text; internal-only application remains open for counsel.</span></li>
+        <li id="source-code"><a href="https://ec.europa.eu/newsroom/dae/redirection/document/129555">Code of Practice on Transparency of AI-Generated Content</a> and the <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/quotes.md#cop-measure-1-1">text-specific quote register</a>. <span>Voluntary Code text, not Article 50 wording.</span></li>
+        <li id="source-guidelines"><a href="https://ec.europa.eu/newsroom/dae/redirection/document/131215">Commission Guidelines on Article 50</a> and the <a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/quotes.md#guidelines-para-70">detection extract</a>. <span>Exact Commission text.</span></li>
+        <li><a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/facts.md">Fact register</a>, especially facts D1, D2, D8, D9 and D10. <span>Current claim status and evidence boundaries.</span></li>
+        <li><a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/docs/implementation.md#delivery-target">Implementation and continuous-validation acceptance contract</a>. <span>Normative definition of the scoped PoC.</span></li>
+        <li><a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/EXPERIMENTS.md#current-build5-d10-mode-evidence-2026-08-09">Mode-complete current build-5 D10 evidence</a>. <span>Commands, complete hash-only projection, tests and cleanup.</span></li>
+        <li><a href="https://github.com/naeemarsalan/vllm-watermark/blob/main/EXPERIMENTS.md#2026-08-09--phase-4-current-managed-path-and-d10-continuous-validation-executed-redacted">Initial current managed-path evidence</a>. <span>Real detector outage and finite eight-surface scan at its recorded detector revision.</span></li>
+        <li><a href="https://github.com/naeemarsalan/refarch-animator">refarch-animator</a>, commit <span class="mono">bae887f</span>. <span>MIT-licensed self-contained architecture storyboard pattern used by this page.</span></li>
+      </ol>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="shell footer-row">
+    <span>Engineering research · not legal advice or proof of compliance.</span>
+    <span>Evidence snapshot: 9 August 2026 · no generated text or secret material embedded.</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var themeButton = $('btn-theme');
+  function currentTheme() {
+    return document.documentElement.getAttribute('data-theme') ||
+      (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  }
+  themeButton.addEventListener('click', function () {
+    var next = currentTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    themeButton.setAttribute('aria-label', 'Switch to ' + (next === 'dark' ? 'light' : 'dark') + ' theme');
+  });
+
+  var GHOSTS = [];
+  var HOT = ['b-external', 'b-client', 'b-gateway', 'b-predictor', 'b-secret', 'b-nemo',
+    'b-broker', 'b-detector', 'b-pending', 'b-sampler', 'b-records', 'b-metrics', 'b-open'];
+
+  /* Each step is absolute state; rendering never depends on the prior step. */
+  var steps = [
+    { t:'A request enters the internal gateway',
+      b:'The executed PoC begins at the cluster-internal validation gateway. This scenario uses N=5, one non-streaming choice, scheme kgw and a non-secret key ID; no watermark secret is sent by the caller.',
+      hot:['b-client','b-gateway'], flows:[['f-request',false]], ordinal:4, selected:0, attempts:0, queue:0, outcome:'request received' },
+    { t:'vLLM generates one completed response',
+      b:'The gateway forwards the OpenAI-compatible request to the RHOAI predictor. vLLM applies the selected KGW processor during decoding with key material mounted from an OpenShift Secret, then returns one completed choice.',
+      hot:['b-gateway','b-predictor','b-secret'], flows:[['f-generate',false],['f-key',false],['f-completion',false]], ordinal:4, selected:0, attempts:0, queue:0, outcome:'completed' },
+    { t:'The persistent sampler selects ordinal 5',
+      b:'After completion, the gateway hashes the content and atomically claims the next SQLite ordinal. Five is divisible by N=5, so this response is selected exactly once; ordinals 1–4 would have bypassed validation.',
+      hot:['b-gateway','b-sampler'], flows:[['f-claim',false]], ordinal:5, selected:1, attempts:0, queue:0, outcome:'selected' },
+    { t:'The exact response is held while validation runs',
+      b:'Synchronous mode holds the selected response in gateway memory and registers its bounded correlation metadata. The gateway calls managed NeMo over verified TLS with the exact response and correlation context.',
+      hot:['b-gateway','b-pending','b-nemo'], flows:[['f-pending',false],['f-nemo',false]], ordinal:5, selected:1, attempts:0, queue:1, outcome:'validating' },
+    { t:'Managed NeMo calls the authenticated broker',
+      b:'The custom output action sends validation ID, response ID, content digest, scheme and key ID to the broker. It sends no response text in the broker payload and does not call the detector directly.',
+      hot:['b-nemo','b-broker'], flows:[['f-action',false]], ordinal:5, selected:1, attempts:0, queue:1, outcome:'broker action' },
+    { t:'The broker resolves and detects the exact held text',
+      b:'The broker verifies the correlation fields, resolves the pending response held by the gateway and calls /v1/watermark/detect. This positive-path example succeeds on the first bounded attempt.',
+      hot:['b-pending','b-broker','b-detector'], flows:[['f-resolve',false],['f-detect',false],['f-detector-result',false]], ordinal:5, selected:1, attempts:1, queue:1, outcome:'watermarked' },
+    { t:'The managed action and gateway cross-check agree',
+      b:'A positive matching-scheme detector result maps to managed NeMo action blocked; a clean result maps to success. The gateway checks that NeMo’s state agrees with the broker’s actual detector result instead of inferring a verdict from the outer envelope.',
+      hot:['b-detector','b-broker','b-nemo','b-gateway'], flows:[['f-verdict',false],['f-managed-result',false]], ordinal:5, selected:1, attempts:1, queue:1, outcome:'positive confirmed' },
+    { t:'Policy delivers a flagged response and records safe evidence',
+      b:'The executed gateway positive policy was flag, so managed blocked and gateway delivered are intentionally different layers. The response is released with safe validation metadata; hash-only records and bounded-label metrics are written, and the pending queue returns to zero.',
+      hot:['b-gateway','b-client','b-records','b-metrics'], flows:[['f-delivery',false],['f-record',false],['f-metrics',false]], ordinal:5, selected:1, attempts:1, queue:0, outcome:'flag · delivered' },
+    { t:'Alternate failure branch: detector outage fails closed',
+      b:'In the separately executed outage case, the detector remained unavailable through three attempts and two retries. Synchronous failure policy returned a fixed content-free HTTP 503; it did not invent a detector verdict. External routing, HA and streaming remain open.',
+      hot:['b-nemo','b-broker','b-detector','b-gateway','b-open'], flows:[['f-nemo',false],['f-action',false],['f-detect',false],['f-delivery',false],['f-record',false]], ordinal:5, selected:1, attempts:3, queue:0, outcome:'fail-closed 503' }
+  ];
+
+  /* Player machinery adapted from refarch-animator. */
+  var cur = 0, playing = false, playTimer = null, initialized = false;
+  var stage = $('stage'), dotLayer = null, animHandle = null, animDots = [];
+  var dotsBox = $('stepdots');
+
+  steps.forEach(function (s, i) {
+    var b = document.createElement('button');
+    b.setAttribute('type', 'button');
+    b.setAttribute('aria-label', 'Step ' + (i + 1) + ': ' + s.t);
+    b.addEventListener('click', function () { stopPlay(); go(i); });
+    dotsBox.appendChild(b);
+  });
+
+  function clearDots() {
+    if (animHandle) cancelAnimationFrame(animHandle);
+    animHandle = null;
+    animDots.forEach(function (d) { d.el.remove(); });
+    animDots = [];
+  }
+
+  function startDots(flowSpecs) {
+    clearDots();
+    if (reduced || !flowSpecs.length) return;
+    if (!dotLayer) {
+      dotLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      stage.appendChild(dotLayer);
+    }
+    flowSpecs.forEach(function (spec, fi) {
+      var path = $(spec[0]);
+      if (!path) return;
+      var len = path.getTotalLength();
+      var plane = path.classList.contains('p1') ? 'p1' : (path.classList.contains('p3') ? 'p3' : 'p2');
+      var n = Math.max(len < 120 ? 1 : 2, Math.min(4, Math.round(len / 140)));
+      var pxSpeed = Math.min(90, len / 1.4);
+      for (var k = 0; k < n; k++) {
+        var c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        c.setAttribute('class', 'anim-dot ' + plane);
+        c.setAttribute('r', '5');
+        dotLayer.appendChild(c);
+        animDots.push({ el:c, path:path, len:len, rev:!!spec[1], off:(k / n) + fi * 0.13, speed:pxSpeed / len });
+      }
+    });
+    var last = performance.now();
+    function tick(now) {
+      var dt = (now - last) / 1000;
+      last = now;
+      animDots.forEach(function (d) {
+        d.off = (d.off + d.speed * dt) % 1;
+        var at = d.rev ? (1 - d.off) * d.len : d.off * d.len;
+        var p = d.path.getPointAtLength(at);
+        d.el.setAttribute('cx', p.x);
+        d.el.setAttribute('cy', p.y);
+      });
+      animHandle = requestAnimationFrame(tick);
+    }
+    animHandle = requestAnimationFrame(tick);
+  }
+
+  function go(i) {
+    cur = (i + steps.length) % steps.length;
+    var s = steps[cur];
+    $('stepnum').textContent = 'Step ' + (cur + 1) + ' / ' + steps.length;
+    $('cap-title').textContent = (cur + 1) + '. ' + s.t;
+    $('cap-body').textContent = s.b;
+    Array.prototype.forEach.call(dotsBox.children, function (d, di) {
+      if (di === cur) d.setAttribute('aria-current', 'true');
+      else d.removeAttribute('aria-current');
+    });
+    HOT.forEach(function (id) { $(id).classList.remove('hot'); });
+    (s.hot || []).forEach(function (id) { $(id).classList.add('hot'); });
+    document.querySelectorAll('#stage .flow:not(.planned-flow)').forEach(function (p) { p.classList.remove('on'); });
+    (s.flows || []).forEach(function (spec) { var p = $(spec[0]); if (p) p.classList.add('on'); });
+    $('c-ordinal').textContent = s.ordinal;
+    $('c-selected').textContent = s.selected;
+    $('c-attempts').textContent = s.attempts;
+    $('c-queue').textContent = s.queue;
+    $('c-outcome').textContent = s.outcome;
+    GHOSTS.forEach(function (id) { $(id).classList.toggle('shown', (s.ghosts || []).indexOf(id) !== -1); });
+    startDots(s.flows || []);
+    if (initialized) {
+      try { history.replaceState(null, '', '#step-' + (cur + 1)); } catch (err) {}
+    }
+  }
+
+  function stopPlay() {
+    playing = false;
+    if (playTimer) clearInterval(playTimer);
+    playTimer = null;
+    var b = $('btn-play');
+    b.setAttribute('aria-pressed', 'false');
+    b.textContent = '▶ Play';
+  }
+
+  $('btn-prev').addEventListener('click', function () { stopPlay(); go(cur - 1); });
+  $('btn-next').addEventListener('click', function () { stopPlay(); go(cur + 1); });
+  $('btn-play').addEventListener('click', function () {
+    if (playing) { stopPlay(); return; }
+    playing = true;
+    this.setAttribute('aria-pressed', 'true');
+    this.textContent = '⏸ Pause';
+    if (cur === steps.length - 1) go(0);
+    playTimer = setInterval(function () {
+      if (cur === steps.length - 1) { stopPlay(); return; }
+      go(cur + 1);
+    }, 7000);
+  });
+
+  $('btn-link').addEventListener('click', function () {
+    var self = this;
+    var url = location.href.split('#')[0] + '#step-' + (cur + 1);
+    try { history.replaceState(null, '', '#step-' + (cur + 1)); } catch (err) {}
+    function done(ok) {
+      self.textContent = ok ? 'Copied' : 'Link in address bar';
+      setTimeout(function () { self.textContent = 'Copy step link'; }, 1600);
+    }
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (err) {}
+      ta.remove();
+      done(ok);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(function () { done(true); }, fallback);
+    } else {
+      fallback();
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    var t = e.target;
+    if (t && t.closest && t.closest('input, textarea, select, .stagewrap')) return;
+    var r = document.querySelector('.player').getBoundingClientRect();
+    if (r.bottom < 80 || r.top > window.innerHeight - 80) return;
+    e.preventDefault();
+    stopPlay();
+    go(e.key === 'ArrowLeft' ? cur - 1 : cur + 1);
+  });
+
+  function applyHash() {
+    var m = /^#step-(\d+)$/.exec(location.hash);
+    if (!m) return;
+    var n = Math.min(steps.length, Math.max(1, parseInt(m[1], 10)));
+    stopPlay();
+    go(n - 1);
+    /* Defer until the browser has restored its initial scroll position. */
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        document.querySelector('.player').scrollIntoView({ block:'start' });
+      });
+    });
+  }
+
+  go(0);
+  initialized = true;
+  applyHash();
+  window.addEventListener('hashchange', applyHash);
+})();
+</script>
+</body>
+</html>

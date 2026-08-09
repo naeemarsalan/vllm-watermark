@@ -1,0 +1,50 @@
+# EXECUTED (scoped Phase 4 state, 2026-08-08): this component selection was
+# server-side dry-run/applied in the recovered run; the DSC reported Ready with
+# KserveReady=True and TrustyAIReady=True. Source: EXPERIMENTS.md recovered
+# transcript. A rerun still requires fresh cluster evidence (`OPEN`).
+#
+# Source: Red Hat OpenShift AI Self-Managed 3.4, "Installing Red Hat
+# OpenShift AI components by using the CLI":
+# https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/installing_and_uninstalling_openshift_ai_self-managed/installing-and-deploying-openshift-ai_install
+#
+# The official example requires every listed component to have a
+# managementState. This selection manages only KServe (single-model serving)
+# and TrustyAI (the operator that manages NemoGuardrails), and explicitly
+# removes the other components in the 3.4 example (`OFFICIAL-SRC` for shape;
+# source: the RHOAI 3.4 installation guide). Runtime and managed guardrails
+# outcomes are recorded separately in EXPERIMENTS.md (`EXECUTED` scoped).
+apiVersion: datasciencecluster.opendatahub.io/v2
+kind: DataScienceCluster
+metadata:
+  name: default-dsc
+spec:
+  components:
+    aipipelines:
+      argoWorkflowsControllers:
+        managementState: Removed
+      managementState: Removed
+    dashboard:
+      managementState: Removed
+    feastoperator:
+      managementState: Removed
+    kserve:
+      managementState: Managed
+      rawDeploymentServiceConfig: Headless
+    kueue:
+      defaultClusterQueueName: default
+      defaultLocalQueueName: default
+      managementState: Removed
+    llamastackoperator:
+      managementState: Removed
+    modelregistry:
+      managementState: Removed
+      registriesNamespace: rhoai-model-registries
+    ray:
+      managementState: Removed
+    trainingoperator:
+      managementState: Removed
+    trustyai:
+      managementState: Managed
+    workbenches:
+      managementState: Removed
+      workbenchNamespace: rhods-notebooks
